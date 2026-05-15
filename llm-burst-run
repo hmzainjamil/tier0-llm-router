@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# llm-burst-run — Wrapper that loads tier0.env then runs llm-burst
+# Use this instead of calling llm-burst directly from shell
+source ~/.claude/tier0.env 2>/dev/null
+exec python3 ~/.claude/bin/llm-burst "$@"

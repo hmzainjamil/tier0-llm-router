@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+# Keys auto-loaded from ~/.claude/tier0.env below
+"""
+llm-burst — Parallel multi-LLM blast + judge
+Sends prompt to ALL Tier 0 models simultaneously, returns best response.
+
+Usage:
+  llm-burst "your prompt here"
+  echo "prompt" | llm-burst
+  llm-burst --models groq,gemini,ollama "prompt"
+  llm-burst --judge-only "prompt"   # G0DM0D3 ULTRAPLINIAN only (fastest)
+
+Output: best response to stdout, metadata to stderr
+"""
+
+import asyncio, os, sys, json, time, re, argparse
+from pathlib import Path
+
+# ── Load keys ────────────────────────────────────────────────────
+env_file = Path.home() / ".claude/tier0.env"
+if env_file.exists():
+    for line in env_file.read_text().splitlines():
+        if line.startswith("export "):
+            line = line[7:]
+        if "=" in line and not line.startswith("#"):
+            k, _, v = line.partition("=")
+            k = k.strip(); v = v.strip().strip('"').strip("'")
+            if k and v and k not in os.environ:
+                os.environ[k] = v
+
+GROQ_KEY      = os.environ.get("GROQ_API_KEY","")
+GEMINI_KEY    = os.environ.get("GEMINI_API_KEY","") or os.environ.get("GOOGLE_API_KEY","")
+OPENAI_KEY    = os.environ.get("OPENAI_API_KEY","")
+OPENROUTER_KEY= os.environ.get("OPENROUTER_API_KEY","")
+DEEPSEEK_KEY  = os.environ.get("DEEPSEEK_API_KEY","")
+GLM_KEY       = os.environ.get("GLM_API_KEY","")
+GLM_BASE      = os.environ.get("GLM_BASE_URL","https://open.bigmodel.cn/api/paas/v4")
+DASHSCOPE_KEY = os.environ.get("DASHSCOPE_API_KEY","")
+G0DM0D3_KEY   = os.environ.get("G0DM0D3_KEY","") or os.environ.get("GODMODE_API_KEY","")
+KIMI_KEY      = os.environ.get("KIMI_API_KEY","") or os.environ.get("MOONSHOT_API_KEY","")
+KIMI_BASE     = os.environ.get("MOONSHOT_BASE_URL","https://api.moonshot.ai/v1")
+BYTEZ_KEY     = os.environ.get("BYTEZ_API_KEY","cb4a7065a586ec6ca26394724ce5ec49")
+BYTEZ_BASE    = os.environ.get("BYTEZ_BASE_URL","https://api.bytez.com/models/v2")
+
+# ── Score a response (judge logic) ───────────────────────────────
+def score_response(text: str, prompt: str) -> float:
+    if not text or len(text) < 20:
+        return 0.0
+    score = 0.0
+    # Length reward (up to 300 words is ideal)
+    words = len(text.split())
+    score += min(words / 300, 1.0) * 30
+    # Completeness: does it address the prompt?
+    prompt_words = set(re.findall(r'\w+', prompt.lower()))
+    resp_words   = set(re.findall(r'\w+', text.lower()))
+    overlap = len(prompt_words & resp_words) / max(len(prompt_words), 1)
+    score += overlap * 25
+    # Structure bonus (bullets, numbered lists)
+    if re.search(r'^\s*[-•*\d]\s', text, re.M):
+        score += 10
+    # No error/refusal penalty
+    if re.search(r"(I cannot|I'm unable|I can't|error|sorry, i|as an AI)", text, re.I):
+        score -= 20
+    # Actionable content
+    if re.search(r'\b(step|action|do|use|run|check|add|create|build)\b', text, re.I):
+        score += 10
+    # Concise + dense
+    if 50 < words < 800:
+        score += 15
+    return round(score, 2)
+
+# ── Model callers ────────────────────────────────────────────────
+async def call_groq(prompt: str, session) -> dict:
+    if not GROQ_KEY: return {"model":"groq","text":"","score":0,"latency":0,"skip":True}
+    import aiohttp
+    t0 = time.time()
+    try:
+        headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+        body = {"model": "llama-3.3-70b-versatile", "messages": [{"role":"user","content":prompt}], "max_tokens": 1024}
+        async with session.post("https://api.groq.com/openai/v1/chat/completions",
+                                headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=15)) as r:
+            d = await r.json()
+            text = d["choices"][0]["message"]["content"]
+            return {"model":"groq:llama3-70b","text":text,"score":score_response(text,prompt),"latency":round(time.time()-t0,2)}
+    except Exception as e:
+        return {"model":"groq","text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e)}
+
+async def call_gemini(prompt: str, session) -> dict:
+    if not GEMINI_KEY: return {"model":"gemini","text":"","score":0,"latency":0,"skip":True}
+    import aiohttp
+    t0 = time.time()
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+        body = {"contents":[{"parts":[{"text":prompt}]}]}
+        async with session.post(url, json=body, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            d = await r.json()
+            text = d["candidates"][0]["content"]["parts"][0]["text"]
+            return {"model":"gemini:flash","text":text,"score":score_response(text,prompt),"latency":round(time.time()-t0,2)}
+    except Exception as e:
+        return {"model":"gemini","text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e)}
+
+async def call_ollama(prompt: str, session) -> dict:
+    t0 = time.time()
+    try:
+        import aiohttp
+        body = {"model":"llama3:latest","prompt":prompt,"stream":False}
+        async with session.post("http://localhost:11434/api/generate",
+                                json=body, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            d = await r.json()
+            text = d.get("response","")
+            return {"model":"ollama:llama3","text":text,"score":score_response(text,prompt),"latency":round(time.time()-t0,2)}
+    except Exception as e:
+        return {"model":"ollama","text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e)}
+
+async def _call_openrouter(model_id: str, label: str, prompt: str, session) -> dict:
+    """Generic OpenRouter caller — reused for all OR models."""
+    import aiohttp as _aio
+    if not OPENROUTER_KEY: return {"model":label,"text":"","score":0,"latency":0,"skip":True}
+    t0 = time.time()
+    try:
+        headers = {"Authorization": f"Bearer {OPENROUTER_KEY}", "Content-Type": "application/json",
+                   "HTTP-Referer": "https://digiminds.agency", "X-Title": "DigiMinds llm-burst"}
+        body = {"model": model_id, "messages": [{"role":"user","content":prompt}], "max_tokens": 1024}
+        async with session.post("https://openrouter.ai/api/v1/chat/completions",
+                                headers=headers, json=body, timeout=_aio.ClientTimeout(total=25)) as r:
+            d = await r.json()
+            text = d["choices"][0]["message"]["content"]
+            return {"model":label,"text":text,"score":score_response(text,prompt),"latency":round(time.time()-t0,2)}
+    except Exception as e:
+        return {"model":label,"text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e)}
+
+# Free forever OpenRouter models (confirmed working 2026-04-30)
+async def call_openrouter_deepseek(prompt: str, session) -> dict:
+    # Paid model — kept for backwards compat but replaced by free alternatives below
+    return await _call_openrouter("openai/gpt-oss-120b:free", "gpt-oss-120b:free", prompt, session)
+
+async def call_openrouter_gemma(prompt: str, session) -> dict:
+    return await _call_openrouter("openai/gpt-oss-20b:free", "gpt-oss-20b:free", prompt, session)
+
+async def call_openrouter_nemotron(prompt: str, session) -> dict:
+    return await _call_openrouter("nvidia/nemotron-3-super-120b-a12b:free", "nemotron-120b:free", prompt, session)
+
+async def call_gpt4o_mini(prompt: str, session) -> dict:
+    if not OPENAI_KEY: return {"model":"gpt4o-mini","text":"","score":0,"latency":0,"skip":True}
+    import aiohttp
+    t0 = time.time()
+    try:
+        headers = {"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"}
+        body = {"model":"gpt-4o-mini","messages":[{"role":"user","content":prompt}],"max_tokens":1024}
+        async with session.post("https://api.openai.com/v1/chat/completions",
+                                headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            d = await r.json()
+            text = d["choices"][0]["message"]["content"]
+            return {"model":"gpt-4o-mini","text":text,"score":score_response(text,prompt),"latency":round(time.time()-t0,2)}
+    except Exception as e:
+        return {"model":"gpt4o-mini","text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e)}
+
+async def call_glm(prompt: str, session) -> dict:
+    if not GLM_KEY: return {"model":"glm","text":"","score":0,"latency":0,"skip":True}
+    import aiohttp
+    t0 = time.time()
+    try:
+        headers = {"Authorization": f"Bearer {GLM_KEY}", "Content-Type": "application/json"}
+        body = {"model":"glm-4.5-air","messages":[{"role":"user","content":prompt}],"max_tokens":1024}
+        async with session.post(f"{GLM_BASE}/chat/completions",
+                                headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=20)) as r:
+            d = await r.json()
+            text = d["choices"][0]["message"]["content"]
+            return {"model":"glm-4.5-air","text":text,"score":score_response(text,prompt),"latency":round(time.time()-t0,2)}
+    except Exception as e:
+        return {"model":"glm","text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e)}
+
+async def call_kimi(prompt: str, session, model: str = "moonshot-v1-8k") -> dict:
+    """Kimi/Moonshot — caveman-compressed, min tokens always, all models"""
+    if not KIMI_KEY: return {"model": model, "text":"","score":0,"latency":0,"skip":True}
+    t0 = time.time()
+    try:
+        headers = {"Authorization": f"Bearer {KIMI_KEY}", "Content-Type": "application/json"}
+        # CAVEMAN — hardcoded on ALL Kimi models forever (incl. future k3, k4 etc.)
+        system = ("Reply ULTRA SHORT. No filler. No repeat. Bullet points only if needed. "
+                  "Max 150 words unless code. Never say 'certainly' or 'here is'. Just answer.")
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user",   "content": prompt}
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.3,
+        }
+        async with session.post(f"{KIMI_BASE}/chat/completions",
+                                headers=headers, json=body,
+                                timeout=aiohttp.ClientTimeout(total=30)) as r:
+            d = await r.json()
+            text = d["choices"][0]["message"]["content"]
+            return {"model": model, "text": text, "score": score_response(text, prompt) + 3,
+                    "latency": round(time.time()-t0, 2)}
+    except Exception as e:
+        return {"model": model, "text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e)}
+
+# All Kimi model variants — caveman-compressed, same core function
+async def call_kimi_8k(prompt, session):    return await call_kimi(prompt, session, "moonshot-v1-8k")
+async def call_kimi_32k(prompt, session):   return await call_kimi(prompt, session, "moonshot-v1-32k")
+async def call_kimi_128k(prompt, session):  return await call_kimi(prompt, session, "moonshot-v1-128k")
+async def call_kimi_k25(prompt, session):   return await call_kimi(prompt, session, "kimi-k2.5")
+async def call_kimi_k26(prompt, session):   return await call_kimi(prompt, session, "kimi-k2.6")
+# Aliases for convenience
+async def call_kimi_long(prompt, session):  return await call_kimi(prompt, session, "moonshot-v1-128k")
+async def call_kimi_k2(prompt, session):    return await call_kimi(prompt, session, "kimi-k2.5")
+
+async def call_bytez(prompt: str, session, model: str = "meta-llama/Llama-3.1-8B-Instruct") -> dict:
+    """Bytez.com — free multi-model access, OpenAI-compatible API"""
+    if not BYTEZ_KEY: return {"model":"bytez","text":"","score":0,"latency":0,"skip":True}
+    import aiohttp
+    t0 = time.time()
+    try:
+        headers = {"Authorization": f"Bearer {BYTEZ_KEY}", "Content-Type": "application/json"}
+        body = {"model": model, "messages": [{"role":"user","content":prompt}],
+                "max_tokens": 1024, "stream": False}
+        async with session.post(f"{BYTEZ_BASE}/chat",
+                                headers=headers, json=body,
+                                timeout=aiohttp.ClientTimeout(total=30)) as r:
+            d = await r.json()
+            text = d["choices"][0]["message"]["content"]
+            return {"model": f"bytez:{model.split('/')[-1]}", "text": text,
+                    "score": score_response(text, prompt), "latency": round(time.time()-t0, 2)}
+    except Exception as e:
+        return {"model":"bytez","text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e),"skip":True}
+
+async def call_g0dm0d3(prompt: str, session) -> dict:
+    """G0DM0D3 ULTRAPLINIAN — races ~55 models, returns best via Liquid Response"""
+    if not G0DM0D3_KEY: return {"model":"g0dm0d3","text":"","score":0,"latency":0,"skip":True}
+    import aiohttp
+    t0 = time.time()
+    try:
+        headers = {"Authorization": f"Bearer {G0DM0D3_KEY}", "Content-Type": "application/json"}
+        body = {
+            "messages": [{"role":"user","content":prompt}],
+            "tier": "standard",
+            "stream": False,
+            "max_tokens": 1024
+        }
+        async with session.post("http://localhost:7860/v1/ultraplinian/completions",
+                                headers=headers, json=body, timeout=aiohttp.ClientTimeout(total=30)) as r:
+            d = await r.json()
+            text = d.get("choices",[{}])[0].get("message",{}).get("content","") or \
+                   d.get("content","") or d.get("text","")
+            # G0DM0D3 already judged — give it a bonus
+            s = score_response(text, prompt)
+            if text: s += 20  # trust ULTRAPLINIAN racing result
+            return {"model":"g0dm0d3:ultraplinian","text":text,"score":s,"latency":round(time.time()-t0,2)}
+    except Exception as e:
+        return {"model":"g0dm0d3","text":"","score":0,"latency":round(time.time()-t0,2),"error":str(e)}
+
+# ── GPT4All local models (Metal-accelerated, zero cost) ──────────────────────
+GPT4ALL_MODELS = {
+    # Confirmed working with gpt4all 2.8.2
+    "llama3-8b":        "Meta-Llama-3-8B-Instruct.Q4_0.gguf",
+    "llama3.1-8b":      "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+    "llama3.2-3b":      "Llama-3.2-3B-Instruct-Q4_0.gguf",
+    "hermes-mistral":   "Hermes-2-Pro-Mistral-7B.Q4_K_M.gguf",
+    "mistral-7b":       "mistral-7b-instruct-v0.1.Q4_0.gguf",
+    "phi3-mini":        "Phi-3-mini-4k-instruct.Q4_0.gguf",
+    "qwen2.5-coder":    "qwen2.5-coder-7b-instruct-q4_0.gguf",
+    # DeepSeek-R1-Qwen: disabled — pre-tokenizer unsupported by gpt4all 2.8.2 llama.cpp
+    # "deepseek-r1-1.5b": "DeepSeek-R1-Distill-Qwen-1.5B-Q4_0.gguf",
+    # "deepseek-r1-7b":   "DeepSeek-R1-Distill-Qwen-7B-Q4_0.gguf",
+}
+GPT4ALL_DIR = Path.home() / "Library/Application Support/nomic.ai/GPT4All"
+
+def call_gpt4all_sync(model_key: str, prompt: str) -> dict:
+    """Run GPT4All model synchronously (blocking — runs in thread pool)."""
+    t0 = time.time()
+    model_file = GPT4ALL_MODELS.get(model_key)
+    if not model_file:
+        return {"model": f"gpt4all:{model_key}", "text": "", "score": 0, "latency": 0, "skip": True}
+    full_path = GPT4ALL_DIR / model_file
+    if not full_path.exists():
+        return {"model": f"gpt4all:{model_key}", "text": "", "score": 0, "latency": 0, "skip": True}
+    try:
+        import gpt4all
+        model = gpt4all.GPT4All(str(full_path), allow_download=False, verbose=False)
+        # DeepSeek-R1 distill models need thinking stripped out
+        is_deepseek = "deepseek" in model_key.lower()
+        with model.chat_session():
+            resp = model.generate(prompt, max_tokens=600, temp=0.7)
+        text = resp.strip() if isinstance(resp, str) else str(resp)
+        # Strip DeepSeek think tags if present
+        if is_deepseek:
+            import re as _re
+            text = _re.sub(r'<think>.*?</think>', '', text, flags=_re.DOTALL).strip()
+        return {"model": f"gpt4all:{model_key}", "text": text,
+                "score": score_response(text, prompt) + 5,  # +5 local bonus (zero cost)
+                "latency": round(time.time() - t0, 2)}
+    except Exception as e:
+        return {"model": f"gpt4all:{model_key}", "text": "", "score": 0,
+                "latency": round(time.time() - t0, 2), "error": str(e)[:80]}
+
+async def call_gpt4all(model_key: str, prompt: str) -> dict:
+    """Wrap blocking GPT4All call in asyncio thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, call_gpt4all_sync, model_key, prompt)
+
+# ── RAM safety check ─────────────────────────────────────────────
+def get_free_ram_gb() -> float:
+    try:
+        import subprocess, re
+        out = subprocess.check_output(["vm_stat"], timeout=3).decode()
+        free  = int(re.search(r'Pages free:\s+(\d+)', out).group(1))
+        inact = int(re.search(r'Pages inactive:\s+(\d+)', out).group(1))
+        return (free + inact) * 4096 / 1024**3
+    except Exception:
+        return 2.0  # assume low if check fails
+
+# ── Model registry ───────────────────────────────────────────────
+# CLOUD_SAFE: zero RAM usage, never cause freezing — DEFAULT burst
+CLOUD_SAFE = {
+    # ── KIMI FIRST — Opus replacement, caveman-compressed, all models ──
+    "kimi-k2.6":  call_kimi_k26,            # ★ #1 DEFAULT — 262K, video, vision, reasoning
+    "kimi-k2.5":  call_kimi_k25,            # ★ #2 — 262K, reasoning, vision
+    "kimi-128k":  call_kimi_128k,           # 128K context — long docs/codebases
+    "kimi-32k":   call_kimi_32k,            # 32K — fast mid-tier
+    "kimi":       call_kimi_8k,             # 8K — cheapest, sub-tasks
+    # ── BYTEZ FREE TIER ───────────────────────────────────────────────
+    "bytez":      call_bytez,               # ✓ FREE — Llama 3.1-8B + 100+ models
+    # ── FREE TIER ──────────────────────────────────────────────────────
+    "groq":       call_groq,                # ✓ FREE forever
+    "deepseek":   call_openrouter_deepseek, # ✓ FREE (gpt-oss-120b:free)
+    "gemma4":     call_openrouter_gemma,    # ✓ FREE (gpt-oss-20b:free)
+    "nemotron":   call_openrouter_nemotron, # ✓ FREE (nemotron-120b:free)
+    "gemini":     call_gemini,              # ✓ FREE 1500/day
+    # ── PAID TIER ──────────────────────────────────────────────────────
+    "gpt4o":      call_gpt4o_mini,          # paid — skips if no credits
+    "glm":        call_glm,                 # paid — skips if no credits
+    # ── ALIASES ────────────────────────────────────────────────────────
+    "kimi-long":  call_kimi_long,           # alias → 128K
+    "kimi-k2":    call_kimi_k2,            # alias → K2.5
+}
+# LOCAL_LIGHT: Ollama only — single process, ~2GB RAM
+LOCAL_LIGHT = {
+    "ollama":   call_ollama,
+}
+# LOCAL_HEAVY: GPT4All — 4-7GB per model, 1 at a time ONLY, requires RAM > 6GB
+# Access via --models gpt4all-* ONLY — never in default burst
+LOCAL_HEAVY = {
+    "gpt4all-llama3-8b":  lambda p, s: call_gpt4all("llama3-8b", p),
+    "gpt4all-llama3.1-8b":lambda p, s: call_gpt4all("llama3.1-8b", p),
+    "gpt4all-llama3.2-3b":lambda p, s: call_gpt4all("llama3.2-3b", p),
+    "gpt4all-hermes":     lambda p, s: call_gpt4all("hermes-mistral", p),
+    "gpt4all-mistral-7b": lambda p, s: call_gpt4all("mistral-7b", p),
+    "gpt4all-phi3":       lambda p, s: call_gpt4all("phi3-mini", p),
+    "gpt4all-qwen-coder": lambda p, s: call_gpt4all("qwen2.5-coder", p),
+}
+# BROKEN: needs OpenRouter paid credits — disabled until funded
+# "g0dm0d3": routes all 55 models through paid OpenRouter
+
+ALL = {**CLOUD_SAFE, **LOCAL_LIGHT, **LOCAL_HEAVY}
+
+# ── Main burst ───────────────────────────────────────────────────
+async def burst(prompt: str, models: list = None) -> dict:
+    import aiohttp
+    ram_gb = get_free_ram_gb()
+
+    if models:
+        # Expand shorthands
+        expanded = []
+        for m in models:
+            if m == "gpt4all":
+                # Safety: only allow if RAM > 6GB
+                if ram_gb < 6.0:
+                    print(f"⚠ GPT4All skipped — only {ram_gb:.1f}GB free RAM (need 6GB+)", file=sys.stderr)
+                else:
+                    expanded += list(LOCAL_HEAVY.keys())
+            elif m == "local":
+                expanded += list(LOCAL_LIGHT.keys())
+            else:
+                expanded.append(m)
+        callers = {k: v for k,v in ALL.items() if k in expanded}
+    else:
+        # Default burst: Kimi K2.6 FIRST + all cloud + Ollama
+        # Kimi K2.6 leads — 262K context, vision, video, reasoning — Opus replacement at 5% cost
+        callers = {}
+        callers["kimi-k2.6"]  = call_kimi_k26   # #1 — ALWAYS first
+        callers["kimi-k2.5"]  = call_kimi_k25   # #2 — reasoning backup
+        callers["groq"]       = call_groq        # #3 — free, fast
+        callers["gemini"]     = call_gemini      # #4 — free 1500/day
+        callers["deepseek"]   = call_openrouter_deepseek  # #5 — free
+        callers["nemotron"]   = call_openrouter_nemotron  # #6 — free
+        callers["gemma4"]     = call_openrouter_gemma     # #7 — free
+        callers["gpt4o"]      = call_gpt4o_mini  # #8 — paid, skips if no credits
+        callers["glm"]        = call_glm         # #9 — paid, skips if no credits
+        callers["ollama"]     = call_ollama      # #10 — local, LaunchAgent persistent
+        callers["bytez"]      = call_bytez       # #11 — bytez.com free tier
+
+    async with aiohttp.ClientSession() as session:
+        tasks = [fn(prompt, session) for fn in callers.values()]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    valid = []
+    for r in results:
+        if isinstance(r, dict) and r.get("text") and not r.get("skip"):
+            valid.append(r)
+
+    if not valid:
+        return {"winner": None, "text": "", "all": []}
+
+    valid.sort(key=lambda x: x["score"], reverse=True)
+    winner = valid[0]
+    return {"winner": winner["model"], "text": winner["text"],
+            "score": winner["score"], "latency": winner["latency"],
+            "all": valid}
+
+# ── CLI entry ─────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="Multi-LLM burst + judge")
+    parser.add_argument("prompt", nargs="?", default=None)
+    parser.add_argument("--models", default=None, help="Comma-separated model list")
+    parser.add_argument("--json", action="store_true", help="Output full JSON")
+    parser.add_argument("--meta", action="store_true", help="Show winner metadata on stderr")
+    args = parser.parse_args()
+
+    if args.prompt:
+        prompt = args.prompt
+    elif not sys.stdin.isatty():
+        prompt = sys.stdin.read().strip()
+    else:
+        print("Usage: llm-burst 'your prompt'", file=sys.stderr)
+        sys.exit(1)
+
+    models = args.models.split(",") if args.models else None
+    result = asyncio.run(burst(prompt, models))
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        if result["text"]:
+            print(result["text"])
+            if args.meta or os.environ.get("LLM_BURST_META"):
+                print(f"\n[Winner: {result['winner']} | score:{result['score']} | {result['latency']}s | {len(result['all'])} models raced]", file=sys.stderr)
+        else:
+            print("[llm-burst] All models failed or unavailable", file=sys.stderr)
+            sys.exit(1)
+
+if __name__ == "__main__":
+    main()
+

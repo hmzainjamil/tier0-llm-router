@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# tier0-cache-inject — Reads latest Tier 0 parallel results and injects into context
+# Run from UserPromptSubmit after tier0-blast-async completes
+source ~/.claude/tier0.env 2>/dev/null
+CACHE_DIR="/tmp/tier0-cache"
+[ ! -d "$CACHE_DIR" ] && exit 0
+
+LATEST=$(cat "$CACHE_DIR/latest.txt" 2>/dev/null)
+[ -z "$LATEST" ] && exit 0
+
+# Find result files from latest run (within last 30s)
+NOW=$(date +%s)
+DELTA=$((NOW - LATEST))
+[ $DELTA -gt 60 ] && exit 0  # Results too old, skip
+
+# Collect responses
+OUTPUT=""
+for f in "$CACHE_DIR"/*.${LATEST}.txt; do
+    [ -f "$f" ] || continue
+    MODEL=$(basename "$f" | sed "s/\.$LATEST\.txt//")
+    CONTENT=$(cat "$f" 2>/dev/null | head -20 | tr '\n' ' ')
+    [ -n "$CONTENT" ] && OUTPUT="$OUTPUT\n[$MODEL]: $CONTENT"
+done
+
+[ -z "$OUTPUT" ] && exit 0
+
+echo "[TIER 0 RESULTS CACHED — use as context for your response]"
+echo -e "$OUTPUT" | head -50

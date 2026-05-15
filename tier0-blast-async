@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# tier0-blast-async — Fire ALL Tier 0 models in background, cache results
+source ~/.claude/tier0.env 2>/dev/null
+# Called on every UserPromptSubmit. Non-blocking.
+
+source ~/.zshrc 2>/dev/null
+export PATH="/Applications/Ollama.app/Contents/Resources:$PATH"
+PROMPT="${1:-$(cat /tmp/tier0-last-prompt.txt 2>/dev/null || echo 'standby')}"
+CACHE_DIR="/tmp/tier0-cache"
+mkdir -p "$CACHE_DIR"
+TIMESTAMP=$(date +%s)
+
+# Ollama (local, zero cost)
+if command -v ollama &>/dev/null; then
+  OLLAMA_MODEL=$(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | head -1)
+  [ -n "$OLLAMA_MODEL" ] && (
+    ollama run "$OLLAMA_MODEL" "$PROMPT" > "$CACHE_DIR/ollama.$TIMESTAMP.txt" 2>/dev/null
+  ) &
+fi
+
+# Groq (free, fast)
+[ -n "$GROQ_API_KEY" ] && (
+  curl -s -X POST "https://api.groq.com/openai/v1/chat/completions" \
+    -H "Authorization: Bearer $GROQ_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"llama-3.3-70b-versatile\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}],\"max_tokens\":1024}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])" \
+    > "$CACHE_DIR/groq.$TIMESTAMP.txt" 2>/dev/null
+) &
+
+# Gemini (free tier)
+GKEY="${GEMINI_API_KEY:-$GOOGLE_API_KEY}"
+[ -n "$GKEY" ] && (
+  curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$GKEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"contents\":[{\"parts\":[{\"text\":\"$PROMPT\"}]}]}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['candidates'][0]['content']['parts'][0]['text'])" \
+    > "$CACHE_DIR/gemini.$TIMESTAMP.txt" 2>/dev/null
+) &
+
+# DeepSeek (direct API)
+[ -n "$DEEPSEEK_API_KEY" ] && (
+  curl -s -X POST "https://api.deepseek.com/v1/chat/completions" \
+    -H "Authorization: Bearer $DEEPSEEK_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}],\"max_tokens\":1024}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])" \
+    > "$CACHE_DIR/deepseek.$TIMESTAMP.txt" 2>/dev/null
+) &
+
+# GPT-4o-mini
+[ -n "$OPENAI_API_KEY" ] && (
+  curl -s -X POST "https://api.openai.com/v1/chat/completions" \
+    -H "Authorization: Bearer $OPENAI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}],\"max_tokens\":1024}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])" \
+    > "$CACHE_DIR/gpt4omini.$TIMESTAMP.txt" 2>/dev/null
+) &
+
+# Gemma 4 31B (Google AI API — direct, uses GEMMA_API_KEY or GEMINI_API_KEY)
+GEMMA_KEY="${GEMMA_API_KEY:-$GEMINI_API_KEY}"
+[ -n "$GEMMA_KEY" ] && (
+  curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=$GEMMA_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"contents\":[{\"parts\":[{\"text\":\"$PROMPT\"}]}]}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['candidates'][0]['content']['parts'][0]['text'])" \
+    > "$CACHE_DIR/gemma4-31b.$TIMESTAMP.txt" 2>/dev/null
+) &
+
+# Gemma 4 31B FREE (OpenRouter — google/gemma-4-31b-it:free)
+[ -n "$OPENROUTER_API_KEY" ] && (
+  curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
+    -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"google/gemma-4-31b-it:free\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}],\"max_tokens\":1024}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])" \
+    > "$CACHE_DIR/gemma4-31b-free.$TIMESTAMP.txt" 2>/dev/null
+) &
+
+# Mistral 7B (via OpenRouter)
+[ -n "$OPENROUTER_API_KEY" ] && (
+  curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
+    -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"mistralai/mistral-7b-instruct\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}],\"max_tokens\":1024}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])" \
+    > "$CACHE_DIR/mistral7b.$TIMESTAMP.txt" 2>/dev/null
+) &
+
+# xAI Grok (if credits available)
+[ -n "$XAI_API_KEY" ] && (
+  curl -s -X POST "https://api.x.ai/v1/chat/completions" \
+    -H "Authorization: Bearer $XAI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"grok-beta\",\"messages\":[{\"role\":\"user\",\"content\":\"$PROMPT\"}],\"max_tokens\":1024}" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'])" \
+    > "$CACHE_DIR/xai-grok.$TIMESTAMP.txt" 2>/dev/null
+) &
+
+wait
+echo "$TIMESTAMP" > "$CACHE_DIR/latest.txt"

@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# tier0-blast — Fire ALL available Tier 0 models in parallel
+source ~/.claude/tier0.env 2>/dev/null
+# Returns first response OR aggregated results from all
+# Usage: tier0-blast "your prompt here" [--mode first|all|best]
+# Mode: first = return fastest response, all = return all, best = longest/most complete
+
+set -e
+PROMPT="${1:-hello}"
+MODE="${2:---all}"
+TMPDIR_BLAST=$(mktemp -d)
+PIDS=()
+RESULTS=()
+
+cleanup() { rm -rf "$TMPDIR_BLAST"; }
+trap cleanup EXIT
+
+# ── GPT4All (local, Metal-accelerated, zero cost) ─────────────────
+GPT4ALL_MODEL="$HOME/Library/Application Support/nomic.ai/GPT4All/Meta-Llama-3-8B-Instruct.Q4_0.gguf"
+if [ -f "$GPT4ALL_MODEL" ] && command -v python3 &>/dev/null; then
+  (
+    RESP=$(echo "$PROMPT" | python3 ~/.claude/bin/gpt4all-inference 2>/dev/null)
+    [ -n "$RESP" ] && echo "GPT4ALL|Meta-Llama-3-8B(local)|$RESP" > "$TMPDIR_BLAST/gpt4all.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── Ollama (local, zero cost) ─────────────────────────────────────
+if command -v ollama &>/dev/null && ollama list &>/dev/null 2>&1; then
+  OLLAMA_MODEL=$(ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | grep -E "llama3|codellama|mistral|deepseek" | head -1)
+  if [ -n "$OLLAMA_MODEL" ]; then
+    (
+      RESP=$(ollama run "$OLLAMA_MODEL" "$PROMPT" 2>/dev/null)
+      echo "OLLAMA|$OLLAMA_MODEL|$RESP" > "$TMPDIR_BLAST/ollama.result"
+    ) &
+    PIDS+=($!)
+  fi
+fi
+
+# ── Groq ─────────────────────────────────────────────────────────
+if [ -n "$GROQ_API_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST "https://api.groq.com/openai/v1/chat/completions" \
+      -H "Authorization: Bearer $GROQ_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"llama-3.3-70b-versatile\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}],\"max_tokens\":2048}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "GROQ|llama-3.3-70b|$RESP" > "$TMPDIR_BLAST/groq.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── Gemini ───────────────────────────────────────────────────────
+GEMINI_KEY="${GEMINI_API_KEY:-$GOOGLE_API_KEY}"
+if [ -n "$GEMINI_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST \
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$GEMINI_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"contents\":[{\"parts\":[{\"text\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}]}]}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['candidates'][0]['content']['parts'][0]['text'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "GEMINI|gemini-2.0-flash|$RESP" > "$TMPDIR_BLAST/gemini.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── Gemma 4 31B (via Google AI API) ──────────────────────────────
+GEMMA_KEY="${GEMMA_API_KEY:-$GEMINI_API_KEY}"
+if [ -n "$GEMMA_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST \
+      "https://generativelanguage.googleapis.com/v1beta/models/gemma-4-31b-it:generateContent?key=$GEMMA_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"contents\":[{\"parts\":[{\"text\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}]}]}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['candidates'][0]['content']['parts'][0]['text'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "GEMMA4|gemma-4-31b-it(GoogleAI)|$RESP" > "$TMPDIR_BLAST/gemma4.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── Gemma 4 31B FREE (via OpenRouter — google/gemma-4-31b-it:free) ──
+if [ -n "$OPENROUTER_API_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
+      -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"google/gemma-4-31b-it:free\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}],\"max_tokens\":2048}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "GEMMA4FREE|gemma-4-31b-it:free(OpenRouter)|$RESP" > "$TMPDIR_BLAST/gemma4free.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── Dashscope / Wan / Qwen (Alibaba) ─────────────────────────────
+if [ -n "$DASHSCOPE_API_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions" \
+      -H "Authorization: Bearer $DASHSCOPE_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"qwen-turbo\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}],\"max_tokens\":2048}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "DASHSCOPE|qwen-turbo(Alibaba)|$RESP" > "$TMPDIR_BLAST/dashscope.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── GLM / Zhipu AI ───────────────────────────────────────────────
+if [ -n "$GLM_API_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST "https://open.bigmodel.cn/api/paas/v4/chat/completions" \
+      -H "Authorization: Bearer $GLM_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"glm-4.5-air\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}],\"max_tokens\":2048}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "GLM|glm-4.5-air(Zhipu)|$RESP" > "$TMPDIR_BLAST/glm.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── DeepSeek via OpenRouter ───────────────────────────────────────
+if [ -n "$OPENROUTER_API_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
+      -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"deepseek/deepseek-chat\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}],\"max_tokens\":2048}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "DEEPSEEK|deepseek-v3|$RESP" > "$TMPDIR_BLAST/deepseek.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── Mistral via OpenRouter ────────────────────────────────────────
+if [ -n "$OPENROUTER_API_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST "https://openrouter.ai/api/v1/chat/completions" \
+      -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"mistralai/mistral-7b-instruct\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}],\"max_tokens\":2048}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "MISTRAL|mistral-7b|$RESP" > "$TMPDIR_BLAST/mistral.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── GPT-4o-mini ───────────────────────────────────────────────────
+if [ -n "$OPENAI_API_KEY" ]; then
+  (
+    RESP=$(curl -s -X POST "https://api.openai.com/v1/chat/completions" \
+      -H "Authorization: Bearer $OPENAI_API_KEY" \
+      -H "Content-Type: application/json" \
+      -d "{\"model\":\"gpt-4o-mini\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$PROMPT" | python3 -c \"import json,sys; print(json.dumps(sys.stdin.read().strip()))\")}],\"max_tokens\":2048}" 2>/dev/null \
+      | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'])" 2>/dev/null)
+    [ -n "$RESP" ] && echo "GPT4OMINI|gpt-4o-mini|$RESP" > "$TMPDIR_BLAST/gpt4omini.result"
+  ) &
+  PIDS+=($!)
+fi
+
+# ── Wait for all parallel jobs ────────────────────────────────────
+TOTAL=${#PIDS[@]}
+if [ $TOTAL -eq 0 ]; then
+  echo "NO_TIER0_AVAILABLE: Set GROQ_API_KEY or GEMINI_API_KEY or install Ollama"
+  exit 1
+fi
+
+# Wait max 30s for all
+for PID in "${PIDS[@]}"; do
+  wait "$PID" 2>/dev/null || true
+done
+
+# ── Collect results ───────────────────────────────────────────────
+COLLECTED=0
+for f in "$TMPDIR_BLAST"/*.result; do
+  [ -f "$f" ] || continue
+  MODEL=$(cut -d'|' -f2 < "$f")
+  CONTENT=$(cut -d'|' -f3- < "$f")
+  echo "=== [$MODEL] ==="
+  echo "$CONTENT"
+  echo ""
+  COLLECTED=$((COLLECTED+1))
+done
+
+if [ $COLLECTED -eq 0 ]; then
+  echo "ALL_TIER0_FAILED: All APIs returned empty. Check keys + network."
+  exit 1
+fi
+
+echo "--- tier0-blast: $COLLECTED/$TOTAL models responded ---"

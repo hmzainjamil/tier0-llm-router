@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+"""
+tier0-burst — Parallel model comparison across ALL Tier 0 sources.
+
+Usage:
+  tier0-burst "your prompt here"
+  tier0-burst --max-tokens 200 "your prompt"
+  tier0-burst --mode fast "quick question"     # small models only (faster)
+  tier0-burst --mode full "complex task"       # all models (comprehensive)
+  tier0-burst --mode cloud "summarize X"       # cloud models only via G0DM0D3
+  tier0-burst --mode local "code task"         # local GPT4All only
+
+Output: ranked responses with scores, winner highlighted.
+"""
+
+import sys, os, time, json, re, argparse, subprocess, concurrent.futures
+import urllib.request, urllib.error
+
+# ─── Config ───────────────────────────────────────────────────────────────────
+GPT4ALL_DIR  = os.path.expanduser("~/Library/Application Support/nomic.ai/GPT4All")
+G0DM0D3_URL  = os.environ.get("G0DM0D3_API", "http://localhost:7860")
+G0DM0D3_KEY  = os.environ.get("G0DM0D3_KEY", "")
+OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+GROQ_KEY     = os.environ.get("GROQ_API_KEY", "")
+GEMINI_KEY   = os.environ.get("GEMINI_API_KEY", "")
+
+# Local models: (filename, short_name, tier, prompt_template)
+# tier: "fast"=<3B, "medium"=3-8B, "code"=coding specialist
+# prompt_template: None=raw, "instruct"=<s>[INST]{p}[/INST], "phi"=<|user|>\n{p}<|end|>\n<|assistant|>
+# KNOWN ISSUES with GPT4All 2.8.2:
+#   DeepSeek-R1 (1.5B/7B): tokenizer 'deepseek-r1-qwen' unsupported → always returns empty
+#   Mistral-7B: returns garbage bytes (BPE tokenizer mismatch in this llama.cpp build)
+#   Fix: use llama-cpp-python backend when available, else skip broken models
+LOCAL_MODELS = [
+    # (filename, name, tier, use_chat_session, known_broken)
+    ("Llama-3.2-3B-Instruct-Q4_0.gguf",           "Llama-3.2-3B",      "fast",   True,  False),
+    ("Phi-3-mini-4k-instruct.Q4_0.gguf",           "Phi-3-mini",        "fast",   True,  False),
+    ("Meta-Llama-3-8B-Instruct.Q4_0.gguf",         "Llama-3-8B",        "medium", True,  False),
+    ("qwen2.5-coder-7b-instruct-q4_0.gguf",        "Qwen2.5-Coder-7B",  "code",   True,  False),
+    # Broken in GPT4All 2.8.2 — needs llama-cpp-python with newer llama.cpp
+    ("mistral-7b-instruct-v0.1.Q4_0.gguf",         "Mistral-7B",        "medium", True,  True),
+    ("DeepSeek-R1-Distill-Qwen-1.5B-Q4_0.gguf",  "DeepSeek-R1-1.5B",  "fast",   False, True),
+    ("DeepSeek-R1-Distill-Qwen-7B-Q4_0.gguf",     "DeepSeek-R1-7B",    "medium", False, True),
+]
+
+# Check if llama-cpp-python is available (newer llama.cpp, supports all models)
+try:
+    import llama_cpp as _lcp
+    LLAMA_CPP_AVAILABLE = True
+except ImportError:
+    LLAMA_CPP_AVAILABLE = False
+
+# ─── Scoring ──────────────────────────────────────────────────────────────────
+def is_garbage(text: str) -> bool:
+    """Detect binary/garbage output from misconfigured models."""
+    if not text:
+        return True
+    printable = sum(1 for c in text if c.isprintable() or c in '\n\r\t')
+    ratio = printable / max(len(text), 1)
+    return ratio < 0.85  # >15% non-printable = garbage
+
+def score_response(text: str, prompt: str) -> float:
+    """Simple quality score: length, coherence, relevance signals."""
+    if not text or len(text.strip()) < 5:
+        return 0.0
+    if is_garbage(text):
+        return 0.0
+    t = text.strip()
+    score = 0.0
+    # Length sweet spot: 50-500 chars
+    ln = len(t)
+    if ln < 10: score += 5
+    elif ln < 50: score += 15
+    elif ln <= 200: score += 30
+    elif ln <= 500: score += 25
+    elif ln <= 1000: score += 20
+    else: score += 10
+    # Penalize truncated responses
+    if t.endswith(("...", "—", "-", ",")):
+        score -= 5
+    # Penalize pure repetition
+    words = t.lower().split()
+    if len(set(words)) < len(words) * 0.4 and len(words) > 10:
+        score -= 15
+    # Penalize meta-commentary
+    bad = ["as an ai", "i cannot", "i'm unable", "i don't have", "g0dm0d3 activated"]
+    for b in bad:
+        if b in t.lower():
+            score -= 10
+    # Bonus: structured output
+    if any(x in t for x in ["```", "**", "##", "1.", "- "]):
+        score += 5
+    # Bonus: answers directly
+    prompt_words = set(prompt.lower().split()) - {"the","a","an","is","what","how","why","in","of"}
+    hits = sum(1 for w in prompt_words if w in t.lower())
+    score += min(hits * 3, 15)
+    return max(0.0, score)
+
+# ─── Local model inference ────────────────────────────────────────────────────
+LLAMA_CLI = "/opt/homebrew/bin/llama-cli"
+LLAMA_CLI_AVAILABLE = os.path.exists(LLAMA_CLI)
+
+def query_local_llama_cli(model_file: str, name: str, prompt: str, max_tokens: int) -> dict:
+    """Use brew llama-cli (latest llama.cpp, Metal GPU) for models broken in GPT4All."""
+    model_path = os.path.join(GPT4ALL_DIR, model_file)
+    t0 = time.time()
+    try:
+        result = subprocess.run(
+            [LLAMA_CLI, "-m", model_path, "-p", prompt,
+             "-n", str(max_tokens), "-ngl", "99", "--log-disable", "--no-display-prompt",
+             "-st", "-t", "8"],
+            capture_output=True, text=True, timeout=90
+        )
+        elapsed = int((time.time()-t0)*1000)
+        import re
+        out = result.stdout.strip()
+        # Strip llama-cli banner (everything before first ">" or after banner block)
+        # Banner ends with "▀▀    ▀▀\n\n" or similar block-art
+        banner_end = re.search(r'▀▀\s*\n+', out)
+        if banner_end:
+            out = out[banner_end.end():]
+        # Strip "Loading model..." line
+        out = re.sub(r'^Loading model.*?\n', '', out, flags=re.MULTILINE)
+        # Strip "build/model/modalities" lines
+        out = re.sub(r'^(build|model|modalities)\s*:.*\n', '', out, flags=re.MULTILINE)
+        # Strip "available commands" block
+        out = re.sub(r'available commands:.*?(?=\n\n|\Z)', '', out, flags=re.DOTALL)
+        # Strip "> " prompt prefix
+        out = re.sub(r'^>\s*', '', out, flags=re.MULTILINE)
+        # Strip "[ Prompt: ... ]" stats line
+        out = re.sub(r'\[\s*Prompt:.*?\]', '', out)
+        # Remove the prompt echo if present
+        if out.strip().startswith(prompt.strip()):
+            out = out.strip()[len(prompt.strip()):].strip()
+        # Remove think tags and DeepSeek-R1 artifacts
+        out = re.sub(r'<think>.*?</think>', '', out, flags=re.DOTALL)
+        out = re.sub(r'\[(?:Start|End) thinking\]', '', out)
+        out = re.sub(r'^\s*\|[-\\|/]+\s*$', '', out, flags=re.MULTILINE)
+        out = re.sub(r'^Exiting\.\.\.\s*$', '', out, flags=re.MULTILINE)
+        # Collapse multiple blank lines to one
+        out = re.sub(r'\n{3,}', '\n\n', out).strip()
+        if out:
+            return {"model": name, "source": "local/llama.cpp", "ok": True,
+                    "text": out, "duration_ms": elapsed}
+        return {"model": name, "source": "local/llama.cpp", "ok": False,
+                "text": "", "error": "empty output", "duration_ms": elapsed}
+    except subprocess.TimeoutExpired:
+        return {"model": name, "source": "local/llama.cpp", "ok": False,
+                "text": "", "error": "timeout", "duration_ms": 90000}
+    except Exception as e:
+        return {"model": name, "source": "local/llama.cpp", "ok": False,
+                "text": "", "error": str(e), "duration_ms": int((time.time()-t0)*1000)}
+
+def query_local(model_file: str, name: str, prompt: str, max_tokens: int,
+                use_chat_session: bool = True, known_broken: bool = False) -> dict:
+    """Run a single local model. Uses llama-cli for broken models, GPT4All for others."""
+    # Broken in GPT4All 2.8.2 → use llama-cli if available
+    if known_broken:
+        if LLAMA_CLI_AVAILABLE:
+            return query_local_llama_cli(model_file, name, prompt, max_tokens)
+        return {"model": name, "source": "local", "ok": False,
+                "text": "", "error": "tokenizer unsupported (install llama.cpp: brew install llama.cpp)",
+                "duration_ms": 0}
+
+    chat_flag = "True" if use_chat_session else "False"
+    script = f"""
+import sys, os, time
+os.environ['no_proxy'] = '*'
+import warnings; warnings.filterwarnings('ignore')
+try:
+    from gpt4all import GPT4All
+    import json
+    t0 = time.time()
+    m = GPT4All(
+        model_name={repr(model_file)},
+        model_path={repr(GPT4ALL_DIR)},
+        allow_download=False,
+        verbose=False
+    )
+    load_ms = int((time.time()-t0)*1000)
+    t1 = time.time()
+    if {chat_flag}:
+        with m.chat_session():
+            out = m.generate({repr(prompt)}, max_tokens={max_tokens}, temp=0.3, top_p=0.9)
+    else:
+        out = m.generate({repr(prompt)}, max_tokens={max_tokens}, temp=0.3, top_p=0.9)
+    gen_ms = int((time.time()-t1)*1000)
+    text = out.strip()
+    printable = sum(1 for c in text if c.isprintable() or c in '\\n\\r\\t')
+    ratio = printable / max(len(text), 1) if text else 0
+    if ratio < 0.85:
+        print(json.dumps({{"ok":False,"error":"garbage output (tokenizer mismatch)","text":""}}))
+    elif not text:
+        print(json.dumps({{"ok":False,"error":"empty output","text":""}}))
+    else:
+        print(json.dumps({{"ok":True,"text":text,"load_ms":load_ms,"gen_ms":gen_ms}}))
+except Exception as e:
+    import json; print(json.dumps({{"ok":False,"error":str(e)}}))
+"""
+    t0 = time.time()
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=90
+        )
+        # Find last JSON line in output
+        for line in reversed(result.stdout.strip().splitlines()):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    data = json.loads(line)
+                    elapsed = int((time.time()-t0)*1000)
+                    return {"model": name, "source": "local", "ok": data.get("ok", False),
+                            "text": data.get("text",""), "error": data.get("error",""),
+                            "duration_ms": elapsed}
+                except: pass
+    except subprocess.TimeoutExpired:
+        return {"model": name, "source": "local", "ok": False, "text": "", "error": "timeout", "duration_ms": 90000}
+    except Exception as e:
+        return {"model": name, "source": "local", "ok": False, "text": "", "error": str(e), "duration_ms": 0}
+    return {"model": name, "source": "local", "ok": False, "text": "", "error": "no output", "duration_ms": int((time.time()-t0)*1000)}
+
+# ─── Cloud model inference ────────────────────────────────────────────────────
+def http_post(url: str, data: dict, headers: dict, timeout: int = 20) -> dict:
+    body = json.dumps(data).encode()
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception as e:
+        return {"error": str(e)}
+
+def query_g0dm0d3_ultraplinian(prompt: str, max_tokens: int) -> list:
+    """Race 12 cloud models via G0DM0D3 Ultraplinian, return ranked results."""
+    if not G0DM0D3_KEY:
+        return []
+    t0 = time.time()
+    result = http_post(
+        f"{G0DM0D3_URL}/v1/ultraplinian/completions",
+        {"messages": [{"role":"user","content": prompt}],
+         "max_tokens": max_tokens, "stream": False},
+        {"Content-Type": "application/json", "Authorization": f"Bearer {G0DM0D3_KEY}"},
+        timeout=30
+    )
+    elapsed = int((time.time()-t0)*1000)
+    if "error" in result:
+        return [{"model": "g0dm0d3-ultraplinian", "source": "cloud", "ok": False,
+                 "text": "", "error": result["error"], "duration_ms": elapsed}]
+    results = []
+    for r in result.get("race", {}).get("rankings", []):
+        results.append({
+            "model": r["model"],
+            "source": "cloud/g0dm0d3",
+            "ok": r.get("success", False),
+            "text": r.get("content",""),
+            "duration_ms": r.get("duration_ms", elapsed),
+            "_g0dm0d3_score": r.get("score", 0)
+        })
+    return results
+
+def query_groq(prompt: str, max_tokens: int, model: str = "llama3-70b-8192") -> dict:
+    if not GROQ_KEY:
+        return {}
+    t0 = time.time()
+    r = http_post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {"model": model, "messages": [{"role":"user","content": prompt}],
+         "max_tokens": max_tokens, "temperature": 0.3},
+        {"Content-Type": "application/json", "Authorization": f"Bearer {GROQ_KEY}"},
+        timeout=15
+    )
+    elapsed = int((time.time()-t0)*1000)
+    text = ""
+    try: text = r["choices"][0]["message"]["content"].strip()
+    except: pass
+    return {"model": f"groq/{model}", "source": "cloud/groq", "ok": bool(text),
+            "text": text, "duration_ms": elapsed, "error": r.get("error",{}).get("message","") if not text else ""}
+
+def query_openrouter(prompt: str, max_tokens: int, model: str = "deepseek/deepseek-chat") -> dict:
+    if not OPENROUTER_KEY:
+        return {}
+    t0 = time.time()
+    r = http_post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {"model": model, "messages": [{"role":"user","content": prompt}],
+         "max_tokens": max_tokens, "temperature": 0.3},
+        {"Content-Type": "application/json", "Authorization": f"Bearer {OPENROUTER_KEY}",
+         "HTTP-Referer": "https://digiminds.org", "X-Title": "Tier0 Burst"},
+        timeout=20
+    )
+    elapsed = int((time.time()-t0)*1000)
+    text = ""
+    try: text = r["choices"][0]["message"]["content"].strip()
+    except: pass
+    return {"model": f"openrouter/{model}", "source": "cloud/openrouter", "ok": bool(text),
+            "text": text, "duration_ms": elapsed, "error": r.get("error","") if not text else ""}
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="Tier0 Burst — parallel model race")
+    parser.add_argument("prompt", nargs="?", help="Prompt to send")
+    parser.add_argument("--max-tokens", type=int, default=300)
+    parser.add_argument("--mode", choices=["fast","full","cloud","local"], default="full")
+    parser.add_argument("--top", type=int, default=3, help="Show top N results")
+    parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    args = parser.parse_args()
+
+    if not args.prompt:
+        prompt = sys.stdin.read().strip()
+    else:
+        prompt = args.prompt
+
+    if not prompt:
+        print("Usage: tier0-burst \"your prompt\"")
+        sys.exit(1)
+
+    print(f"\n{'='*60}")
+    print(f"TIER0 BURST — Mode: {args.mode.upper()} | Max tokens: {args.max_tokens}")
+    print(f"Prompt: {prompt[:80]}{'...' if len(prompt)>80 else ''}")
+    print(f"{'='*60}\n")
+
+    all_futures = {}
+    all_results = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+        # 1. LOCAL MODELS (selected by mode)
+        if args.mode in ("fast", "full", "local"):
+            tiers = {"fast": ["fast"], "full": ["fast","medium","code"], "local": ["fast","medium","code"]}
+            selected_tiers = tiers[args.mode]
+            for fname, name, tier, use_chat, broken in LOCAL_MODELS:
+                if tier not in selected_tiers:
+                    continue
+                fpath = os.path.join(GPT4ALL_DIR, fname)
+                if not os.path.exists(fpath):
+                    continue
+                status = " [via llama.cpp]" if broken and LLAMA_CLI_AVAILABLE else (" [SKIP: install llama.cpp]" if broken else "")
+                print(f"  [LOCAL ] Querying {name}...{status}")
+                f = pool.submit(query_local, fname, name, prompt, args.max_tokens, use_chat, broken)
+                all_futures[f] = name
+
+        # 2. CLOUD MODELS via G0DM0D3 Ultraplinian (races 12 cloud models)
+        if args.mode in ("full", "cloud"):
+            if G0DM0D3_KEY:
+                print(f"  [CLOUD ] G0DM0D3 Ultraplinian (12 cloud models racing)...")
+                f = pool.submit(query_g0dm0d3_ultraplinian, prompt, args.max_tokens)
+                all_futures[f] = "g0dm0d3"
+
+        # 3. Groq (fastest cloud inference)
+        if args.mode in ("full", "cloud") and GROQ_KEY:
+            print(f"  [CLOUD ] Groq Llama-3 70B...")
+            f = pool.submit(query_groq, prompt, args.max_tokens)
+            all_futures[f] = "groq"
+
+        # 4. OpenRouter DeepSeek
+        if args.mode in ("full", "cloud") and OPENROUTER_KEY:
+            print(f"  [CLOUD ] OpenRouter DeepSeek-V3...")
+            f = pool.submit(query_openrouter, prompt, args.max_tokens)
+            all_futures[f] = "openrouter"
+
+        print()
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(all_futures):
+            name = all_futures[future]
+            try:
+                result = future.result()
+                if isinstance(result, list):
+                    all_results.extend(result)
+                elif isinstance(result, dict) and result:
+                    all_results.append(result)
+            except Exception as e:
+                all_results.append({"model": name, "ok": False, "error": str(e), "text": "", "duration_ms": 0})
+
+    # Score all results
+    for r in all_results:
+        if r.get("ok") and r.get("text"):
+            base = score_response(r["text"], prompt)
+            # G0DM0D3 already provides internal scoring - blend it in
+            g_score = r.pop("_g0dm0d3_score", 0)
+            r["score"] = round(base + (g_score * 0.3), 1)
+        else:
+            r["score"] = 0.0
+
+    # Sort by score
+    ranked = sorted(all_results, key=lambda x: x["score"], reverse=True)
+    successful = [r for r in ranked if r.get("ok") and r["score"] > 0]
+    failed = [r for r in ranked if not r.get("ok") or r["score"] == 0]
+
+    if args.json:
+        print(json.dumps(ranked, indent=2))
+        return
+
+    # ─── Display results ───────────────────────────────────────────────────
+    print(f"{'─'*60}")
+    print(f"RESULTS: {len(successful)} succeeded, {len(failed)} failed")
+    print(f"{'─'*60}\n")
+
+    if not successful:
+        print("No successful responses. Check model availability.")
+        for r in failed[:5]:
+            print(f"  FAIL [{r['model']}]: {r.get('error','unknown')}")
+        sys.exit(1)
+
+    # Show top N
+    for i, r in enumerate(successful[:args.top]):
+        crown = "WINNER" if i == 0 else f"#{i+1}"
+        src = r.get("source","?")
+        ms = r.get("duration_ms", 0)
+        print(f"{'★ ' if i==0 else '  '}[{crown}] {r['model']} ({src}) | score={r['score']} | {ms}ms")
+        print(f"  {r['text'][:400]}{'...' if len(r.get('text',''))>400 else ''}")
+        print()
+
+    if len(successful) > args.top:
+        print(f"... and {len(successful)-args.top} more responses (use --top {len(successful)} to see all)\n")
+
+    if failed:
+        print(f"FAILED ({len(failed)}): {', '.join(r['model'] for r in failed[:8])}")
+
+    # Return winner text to stdout for piping
+    winner = successful[0]
+    print(f"\n{'═'*60}")
+    print(f"BEST ANSWER [{winner['model']}]:")
+    print(f"{'═'*60}")
+    print(winner["text"])
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+source ~/.claude/tier0.env 2>/dev/null
+
+# Fire all Tier 0 models in background (non-blocking)
+~/.claude/bin/tier0-blast-async 2>/dev/null &
+
+# Build live status
+OLLAMA_MODEL=$(PATH="/Applications/Ollama.app/Contents/Resources:$PATH" ollama list 2>/dev/null | tail -n +2 | awk '{print $1}' | head -1)
+ACTIVE=""
+GPT4ALL_MODEL="$HOME/Library/Application Support/nomic.ai/GPT4All/Meta-Llama-3-8B-Instruct.Q4_0.gguf"
+[ -f "$GPT4ALL_MODEL" ] && ACTIVE="GPT4All(Meta-Llama-3-8B-local)"
+[ -n "$OLLAMA_MODEL" ] && ACTIVE="$ACTIVE | Ollama($OLLAMA_MODEL)"
+[ -n "$GROQ_API_KEY" ] && ACTIVE="$ACTIVE | Groq(llama3-70b)"
+[ -n "$GEMINI_API_KEY" ] && ACTIVE="$ACTIVE | Gemini(flash) | Gemma4-31B(GoogleAI)"
+[ -n "$OPENROUTER_API_KEY" ] && ACTIVE="$ACTIVE | Gemma4-31B:free(OpenRouter)"
+[ -n "$OPENAI_API_KEY" ] && ACTIVE="$ACTIVE | GPT-4o-mini"
+[ -n "$GLM_API_KEY" ] && ACTIVE="$ACTIVE | GLM(glm-4.5-air,glm-4.5,glm-5-turbo)"
+[ -n "$DASHSCOPE_API_KEY" ] && ACTIVE="$ACTIVE | Dashscope/Wan(qwen-turbo,wan2.7-image,wan2.7-image-pro)"
+[ -n "$OPENROUTER_API_KEY" ] && ACTIVE="$ACTIVE | G0DM0D3-ULTRAPLINIAN(55 models) | OpenRouter(DeepSeek+Mistral)"
+
+cat << INJECT
+[TIER 0 + G0DM0D3 + LLM-BURST + L99 + OODA — PERMANENTLY ACTIVE — ALL SESSIONS/TASKS]
+Active models: $ACTIVE
+
+ROUTING (any model, any interface — no exceptions):
+• Sub-tasks → llm-burst FIRST (8 models parallel, judge picks best). Claude = final synthesis only.
+• Max quality → llm-burst --models g0dm0d3,groq,gemini,deepseek (multi-winner synthesis)
+• Research/draft → Groq or Gemini  |  Code → Ollama/DeepSeek  |  Web data → Apify MCP
+• LLM-BURST CMD: ~/.claude/bin/llm-burst "prompt" [--models groq,gemini,ollama,deepseek,gpt4o,glm,g0dm0d3]
+
+MULTI-LLM BURST PROTOCOL (auto on every task):
+1. Blast prompt to: Groq(llama3-70b) + Gemini(flash) + Ollama(llama3) + DeepSeek(V3) + GPT-4o-mini + GLM(4.5-air) + G0DM0D3(ULTRAPLINIAN/55models) in PARALLEL
+2. Score all responses: completeness + structure + actionability + length
+3. Pick winner (highest score) — synthesize top 2-3 if complementary
+4. Claude writes final output using winning content as source material
+5. RESULT: best-of-8-models quality, ~zero Claude token cost for sub-tasks
+
+L99 (always): Max performance. Full capability. No hedging. No half-measures.
+OODA (every task): Observe→Orient→Decide→Act. Loop until done. No guessing.
+EFFORT (always): Treat every task as /effort high — deep reasoning, full context read, never lazy shortcuts.
+
+AUTO-CHUNKING (large tasks): If task has >3 distinct steps or touches >5 files, auto-split into parallel sub-agents via llm-burst. Never waterfall a large task serially.
+
+PROACTIVE COMPRESSION: If context token count feels large (many tool calls, long session), invoke context-compression skill BEFORE hitting limit — summarize + anchor state, not after it's too late.
+
+GIT DISCIPLINE: For any new project directory → run `git init && git add . && git commit -m "init"` before first code change. Git = free rewind, never waste Claude tokens on reverting.
+
+OUTPUT: no preamble, no summary, bullets+fragments, caveman terse
+TOOLS: parallel batch always. Never waterfall.
+INJECT

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# tier0-check — Detects available Tier 0 models on this machine
+source ~/.claude/tier0.env 2>/dev/null
+# Run once per session to know what's available before using Claude tokens
+
+AVAILABLE=()
+UNAVAILABLE=()
+
+# ── GPT4All (local, Metal-accelerated, zero cost) ─────────────────
+GPT4ALL_DIR="$HOME/Library/Application Support/nomic.ai/GPT4All"
+FOUND_MODELS=""
+FOUND_COUNT=0
+_check_model() { [ -f "$GPT4ALL_DIR/$2" ] && FOUND_MODELS="$FOUND_MODELS $1" && FOUND_COUNT=$((FOUND_COUNT+1)); }
+_check_model "Meta-Llama-3-8B"    "Meta-Llama-3-8B-Instruct.Q4_0.gguf"
+_check_model "Meta-Llama-3.1-8B"  "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+_check_model "Llama-3.2-3B"       "Llama-3.2-3B-Instruct-Q4_0.gguf"
+_check_model "Hermes-Mistral-7B"  "Hermes-2-Pro-Mistral-7B.Q4_K_M.gguf"
+_check_model "Mistral-7B"         "mistral-7b-instruct-v0.1.Q4_0.gguf"
+_check_model "Phi-3-mini"         "Phi-3-mini-4k-instruct.Q4_0.gguf"
+_check_model "Qwen2.5-Coder-7B"   "qwen2.5-coder-7b-instruct-q4_0.gguf"
+if [ $FOUND_COUNT -gt 0 ]; then
+  AVAILABLE+=("gpt4all:[${FOUND_COUNT}models]")
+  echo "✓ GPT4All   — AVAILABLE  ($FOUND_COUNT models:$FOUND_MODELS)"
+else
+  UNAVAILABLE+=("gpt4all")
+  echo "✗ GPT4All   — no models found in: $GPT4ALL_DIR"
+fi
+
+# ── Ollama (local, always-on LaunchAgent) ────────────────────────
+OLLAMA_BIN="/usr/local/bin/ollama"
+if curl -s http://localhost:11434/api/tags --max-time 3 &>/dev/null; then
+  MODELS=$($OLLAMA_BIN list 2>/dev/null | tail -n +2 | awk '{print $1}' | tr '\n' ',' | sed 's/,$//' || echo "llama3:latest")
+  AVAILABLE+=("ollama:[$MODELS]")
+  echo "✓ Ollama    — AVAILABLE  models: $MODELS  (LaunchAgent: permanent)"
+elif [ -f "$OLLAMA_BIN" ]; then
+  # Not running — LaunchAgent will restart it
+  $OLLAMA_BIN serve &>/tmp/ollama.log &
+  sleep 2
+  AVAILABLE+=("ollama:starting")
+  echo "⟳ Ollama    — STARTING   (was down, restarting via $OLLAMA_BIN)"
+else
+  UNAVAILABLE+=("ollama")
+  echo "✗ Ollama    — not installed (install from ollama.com)"
+fi
+
+# ── OpenRouter ────────────────────────────────────────────────────
+if [ -n "$OPENROUTER_API_KEY" ]; then
+  AVAILABLE+=("openrouter")
+  echo "✓ OpenRouter — AVAILABLE  (DeepSeek-V3, Mistral, GPT-4o-mini etc.)"
+else
+  UNAVAILABLE+=("openrouter")
+  echo "✗ OpenRouter — no key     (set OPENROUTER_API_KEY)"
+fi
+
+# ── Groq ─────────────────────────────────────────────────────────
+if [ -n "$GROQ_API_KEY" ]; then
+  AVAILABLE+=("groq")
+  echo "✓ Groq      — AVAILABLE  (llama3-70b, mixtral-8x7b)"
+else
+  UNAVAILABLE+=("groq")
+  echo "✗ Groq      — no key     (set GROQ_API_KEY, free tier available)"
+fi
+
+# ── Gemini ───────────────────────────────────────────────────────
+if [ -n "$GEMINI_API_KEY" ] || [ -n "$GOOGLE_API_KEY" ]; then
+  AVAILABLE+=("gemini")
+  echo "✓ Gemini    — AVAILABLE  (gemini-2.0-flash, gemini-1.5-pro)"
+elif command -v gemini &>/dev/null; then
+  AVAILABLE+=("gemini-cli")
+  echo "✓ Gemini CLI— AVAILABLE  (gemini CLI tool found)"
+else
+  UNAVAILABLE+=("gemini")
+  echo "✗ Gemini    — no key     (set GEMINI_API_KEY)"
+fi
+
+# ── GLM / Zhipu AI ───────────────────────────────────────────────
+if [ -n "$GLM_API_KEY" ]; then
+  AVAILABLE+=("glm")
+  echo "✓ GLM       — AVAILABLE  (glm-4.5, glm-4.5-air, glm-5-turbo, glm-4.6)"
+else
+  UNAVAILABLE+=("glm")
+  echo "✗ GLM       — no key     (set GLM_API_KEY — open.bigmodel.cn)"
+fi
+
+# ── Dashscope / Wan (Alibaba) ─────────────────────────────────────
+if [ -n "$DASHSCOPE_API_KEY" ]; then
+  AVAILABLE+=("dashscope")
+  echo "✓ Dashscope — AVAILABLE  (wan2.7-image, wan2.7-image-pro, Qwen3.6 — enable models at dashscope.console.aliyun.com)"
+else
+  UNAVAILABLE+=("dashscope")
+  echo "✗ Dashscope — no key     (set DASHSCOPE_API_KEY — alibaba cloud)"
+fi
+
+# ── GPT-4o-mini ───────────────────────────────────────────────────
+if [ -n "$OPENAI_API_KEY" ]; then
+  AVAILABLE+=("gpt-4o-mini")
+  echo "✓ GPT-4o-mini — AVAILABLE"
+else
+  UNAVAILABLE+=("gpt-4o-mini")
+  echo "✗ GPT-4o-mini — no key   (set OPENAI_API_KEY)"
+fi
+
+# ── Gemma 4 ──────────────────────────────────────────────────────
+if [ -n "$GEMMA_API_KEY" ]; then
+  AVAILABLE+=("gemma4")
+  echo "✓ Gemma 4    — AVAILABLE  (gemma-4-31b-it, gemma-4-26b-a4b-it)"
+else
+  UNAVAILABLE+=("gemma4")
+  echo "✗ Gemma 4    — no key     (set GEMMA_API_KEY)"
+fi
+
+echo ""
+AVAIL_COUNT=${#AVAILABLE[@]}
+
+if [ $AVAIL_COUNT -eq 0 ]; then
+  echo "⚠  NO Tier 0 models available — Claude Haiku will be used as fallback"
+  echo "   Token cost: ~\$0.08/MTok (vs \$3/MTok Sonnet)"
+  echo "   To fix: run 'ollama pull llama3' (free, local)"
+else
+  echo "Active Tier 0: ${AVAILABLE[*]}"
+  echo "Claude tokens needed: ZERO for sub-tasks"
+fi
+
+# Write status to cache for session use
+mkdir -p ~/.claude
+python3 - << PYEOF
+import json, datetime
+available  = "${AVAILABLE[*]}".split() if "${AVAILABLE[*]}" else []
+unavail    = "${UNAVAILABLE[*]}".split() if "${UNAVAILABLE[*]}" else []
+data = {
+    "checked": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "available": available,
+    "unavailable": unavail,
+    "use_claude_fallback": len(available) == 0,
+}
+with open(f"{__import__('os').path.expanduser('~')}/.claude/tier0-status.json", "w") as f:
+    json.dump(data, f, indent=2)
+PYEOF
