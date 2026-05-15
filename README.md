@@ -1,59 +1,73 @@
 # tier0-llm-router
-Blast all free/cheap LLMs in parallel — Groq, Gemini, DeepSeek, GPT-4o-mini, Ollama. First response wins.
 
-![Shell](https://img.shields.io/badge/Shell-Bash-4EAA25?style=flat&labelColor=555&logo=gnubash)
-![Groq](https://img.shields.io/badge/Groq-200tok/s-F55036?style=flat&labelColor=555)
-![Gemini](https://img.shields.io/badge/Gemini-Flash-4285F4?style=flat&labelColor=555)
-![DeepSeek](https://img.shields.io/badge/DeepSeek-V3-black?style=flat&labelColor=555)
-![Ollama](https://img.shields.io/badge/Ollama-Local-white?style=flat&labelColor=555)
-![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat&labelColor=555)
+Local-first LLM router: Ollama → DeepSeek → Gemini → Groq → GPT-4o-mini → Claude last resort. Zero cost for 90% of queries.
 
-[Concepts](#-concepts) · [How It Works](#️-how-it-works) · [Install](#-install) · [Commands](#-commands) · [Tips](#-tips-and-tricks-9) · [Startups](#️-startups--businesses)
+![Router](https://img.shields.io/badge/Router-Tier_0_First-blue?style=flat&labelColor=555) ![Ollama](https://img.shields.io/badge/Ollama-Local-green?style=flat&labelColor=555) ![Free](https://img.shields.io/badge/Cost-Near_Zero-brightgreen?style=flat&labelColor=555) ![License](https://img.shields.io/badge/License-MIT-yellow?style=flat&labelColor=555)
+
+[Concepts](#-concepts) · [How It Works](#-how-it-works) · [Install](#-install) · [Usage](#-usage) · [Config](#-configuration) · [Tips](#-tips-and-tricks-12) · [Troubleshooting](#-troubleshooting) · [Architecture](#-architecture) · [Startups](#️-startups--businesses)
 
 ---
 
 ## 🧠 CONCEPTS
 
 | Feature | Location | Description |
-|---------|----------|-------------|
-| [**tier0-blast**](tier0-blast) | `tier0-blast` | 188-line parallel blaster — fires all Tier 0 models simultaneously |
-| [**tier0-blast-async**](tier0-blast-async) | `tier0-blast-async` | Async variant — non-blocking, returns job ID for later retrieval |
-| [**tier0-burst**](tier0-burst) | `tier0-burst` | 426-line burst mode — high-throughput batch processing |
-| [**tier0-check**](tier0-check) | `tier0-check` | Health check all Tier 0 endpoints — latency, availability, quota |
-| [**tier0-cache-inject**](tier0-cache-inject) | `tier0-cache-inject` | Pre-warm prompt cache across all models before task |
-| [**tier0-prompt-inject**](tier0-prompt-inject) | `tier0-prompt-inject` | Inject system context into all models simultaneously |
-| [**llm-burst**](llm-burst) | `llm-burst` | LLM burst runner — fires single prompt to all, aggregates results |
-| [**llm-burst-run**](llm-burst-run) | `llm-burst-run` | Execution wrapper for llm-burst with retry + fallback logic |
+|---|---|---|
+| Tier System | `config/tiers.yaml` | Tier 0 (free/local) → Tier 1 (cheap) → Tier 2 (Claude) |
+| Provider Registry | `providers/registry.yaml` | All providers with base URLs, models, costs, rate limits |
+| Smart Routing | `router/smart.py` | Routes by task type: code→deepseek, long→gemini, chat→llama |
+| Fallback Chain | `router/fallback.py` | Tier 0 fails → try next Tier 0 → escalate to Tier 1 |
+| Health Checker | `health/checker.py` | Continuous provider ping — removes degraded endpoints |
+| Cost Calculator | `cost/calc.py` | Real-time cost estimate before routing decision |
+| Request Logger | `logging/logger.py` | Every request logged: provider, model, tokens, latency, cost |
+| Rate Limiter | `rate/limiter.py` | Per-provider rate limiting to prevent 429s |
+| Model Selector | `router/model_select.py` | Task-aware model selection within chosen provider |
+| Caching Layer | `cache/semantic.py` | Semantic dedup — same-meaning queries skip re-inference |
+| Budget Enforcer | `budget/enforcer.py` | Hard stops when daily/monthly budget exceeded |
+| Analytics | `analytics/dashboard.py` | Provider usage stats, cost breakdown, cache hit rate |
 
 ### 🔥 Hot
 
 | Feature | Location | Description |
-|---------|----------|-------------|
-| [**First-wins Mode**](tier0-blast) | `--mode first` | Returns fastest response — Groq usually wins at 200+ tok/s |
-| [**Best-of-N**](tier0-blast) | `--mode best` | Returns longest/most complete response from all models |
-| [**Zero Claude Quota**](tier0-burst) | `tier0-burst` | Entire burst uses free/cheap APIs — Claude never touched |
+|---|---|---|
+| Tier 0 First | `config/tiers.yaml` | 90% of queries handled free by local/free providers |
+| Smart Routing | `router/smart.py` | deepseek-coder for code, gemini for long context, llama for chat |
+| Fallback Chain | `router/fallback.py` | Never fails — always escalates until response found |
+| Semantic Cache | `cache/semantic.py` | Identical-intent queries served from cache — 0 tokens |
+| Claude Last Resort | `config/tiers.yaml` | Claude Sonnet only when user explicitly requests it |
 
 ---
 
 ## ⚙️ HOW IT WORKS
 
 ```
-tier0-blast "your prompt" --mode first
-         ↓
-Fires simultaneously to:
-  ├── Groq (llama-3.3-70b)     ~200 tok/s  FREE
-  ├── Gemini Flash 2.0          ~150 tok/s  FREE tier
-  ├── DeepSeek V3               ~120 tok/s  ~$0.001/1k
-  ├── GPT-4o-mini               ~100 tok/s  ~$0.002/1k
-  └── Ollama local qwen2.5:7b   ~40 tok/s   FREE
-         ↓
-First response returned immediately
-Other requests cancelled
-         ↓
-Result cached via tier0-cache-inject for reuse
-```
+Request + Task Type
+    │
+    ▼
+Smart Router
+    ├── task_type = "code"     → deepseek-coder (Tier 0)
+    ├── task_type = "long"     → gemini-flash (Tier 0, 1M ctx)
+    ├── task_type = "chat"     → llama3.1:8b (Tier 0, local)
+    ├── task_type = "reason"   → deepseek-r1:7b (Tier 0)
+    └── task_type = "default"  → Try Tier 0 in order
 
-**Modes:** `--mode first` | `--mode all` | `--mode best`
+Tier 0 Attempt:
+    Ollama → (fail?) → DeepSeek → (fail?) → Gemini → (fail?) → Groq
+
+    │ (all Tier 0 fail)
+    ▼
+Tier 1 Attempt:
+    GPT-4o-mini → (fail?) → Kimi
+
+    │ (Tier 1 fails OR user requests Claude)
+    ▼
+Tier 2:
+    Claude Haiku → Claude Sonnet
+
+Result:
+    ├── Cache write (if cacheable)
+    ├── Log (provider, model, tokens, latency, cost)
+    └── Return response
+```
 
 ---
 
@@ -62,79 +76,195 @@ Result cached via tier0-cache-inject for reuse
 ```bash
 git clone https://github.com/hmzainjamil/tier0-llm-router
 cd tier0-llm-router
-cp tier0-* llm-burst* ~/.claude/bin/
-chmod +x ~/.claude/bin/tier0-* ~/.claude/bin/llm-burst*
+
+pip install -r requirements.txt
+
+# Pull Ollama models
+ollama pull llama3.1:8b
+ollama pull deepseek-r1:7b
+ollama pull deepseek-coder:6.7b
+ollama pull nomic-embed-text
+
+cp .env.example .env
+# Fill: GROQ_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY
+
+# Test routing
+python3 router/smart.py --test
+
+# Check all provider health
+python3 health/checker.py --check-all
+
+# Start router API server
+python3 server.py
 ```
 
-**Configure** `~/.claude/tier0.env`:
+---
+
+## 📟 USAGE
+
 ```bash
-GROQ_API_KEY=gsk_...
-GEMINI_API_KEY=AIza...
-DEEPSEEK_API_KEY=sk-...
-OPENAI_API_KEY=sk-...
-OLLAMA_URL=http://localhost:11434
+# Route a query (auto-selects best Tier 0)
+python3 router/smart.py --prompt "Write a Python function to sort a dict by value"
+
+# Force specific tier
+python3 router/smart.py --prompt "..." --tier 0
+python3 router/smart.py --prompt "..." --tier 2  # Claude only
+
+# Route by task type
+python3 router/smart.py --prompt "..." --task-type code
+python3 router/smart.py --prompt "..." --task-type reason
+python3 router/smart.py --prompt "..." --task-type long
+
+# Check cost estimate before routing
+python3 cost/calc.py --prompt "Long analysis prompt..." --tier 0
+
+# View analytics
+python3 analytics/dashboard.py
+
+# Via REST API (when server running)
+curl -X POST http://localhost:8000/route \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "What is RAG?", "task_type": "chat"}'
+
+# Python SDK
+from tier0_router import Router
+r = Router()
+response = r.route("Explain transformers", task_type="chat")
 ```
 
 ---
 
-## 📟 COMMANDS
+## ⚙️ CONFIGURATION
 
-| Command | Description |
-|---------|-------------|
-| `tier0-blast "prompt"` | Fire all models, return all responses |
-| `tier0-blast "prompt" --mode first` | Return fastest response only |
-| `tier0-blast "prompt" --mode best` | Return most complete response |
-| `tier0-blast-async "prompt"` | Non-blocking — returns job ID |
-| `tier0-burst "prompt" --n 10` | Batch 10 completions in parallel |
-| `tier0-check` | Test all endpoints, show latency table |
-| `tier0-cache-inject "system prompt"` | Pre-warm all model caches |
-| `llm-burst "prompt"` | Aggregate all responses into one |
+| Variable | Default | Description |
+|---|---|---|
+| `TIER0_PROVIDERS` | `ollama,deepseek,groq,gemini` | Tier 0 provider order |
+| `TIER1_PROVIDERS` | `openai,kimi` | Tier 1 provider order |
+| `TIER2_PROVIDERS` | `anthropic` | Tier 2 (last resort) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama endpoint |
+| `CACHE_ENABLED` | `true` | Enable semantic request caching |
+| `CACHE_SIMILARITY_THRESHOLD` | `0.95` | Cosine similarity for cache hit |
+| `HEALTH_CHECK_INTERVAL_S` | `60` | Provider health ping interval |
+| `BUDGET_DAILY_USD` | `2.00` | Daily spend hard cap |
+| `LOG_LEVEL` | `INFO` | Logging verbosity |
+| `SERVER_PORT` | `8000` | REST API server port |
 
 ---
 
-## 💡 TIPS AND TRICKS (9)
+## 💡 TIPS AND TRICKS (12)
 
-[speed](#tips-speed) · [cost](#tips-cost) · [quality](#tips-quality) · [cache](#tips-cache)
+[Routing](#tips-routing) · [Models](#tips-models) · [Cache](#tips-cache) · [Budget](#tips-budget)
 
-<a id="tips-speed"></a>■ **Speed (3)**
-
-| Tip | Source |
-|-----|--------|
-| Groq wins `--mode first` 90% of the time — use it as default for latency-sensitive tasks | [HMZ](https://github.com/hmzainjamil) |
-| `tier0-blast-async` + later retrieval = zero blocking in pipelines | [DigiMinds](https://github.com/hmzainjamil) |
-| Pre-warm with `tier0-cache-inject` at session start — 3x faster on repeated prompts | [HMZ](https://github.com/hmzainjamil) |
-
-<a id="tips-cost"></a>■ **Cost (2)**
+<a id="tips-routing"></a>■ **Smart Routing (3)**
 
 | Tip | Source |
-|-----|--------|
-| Groq + Gemini Flash free tiers handle 90% of tasks — DeepSeek for overflow | [HMZ](https://github.com/hmzainjamil) |
-| `tier0-check` shows remaining quota per provider — run before heavy batch jobs | [HMZ](https://github.com/hmzainjamil) |
+|---|---|
+| Tag your prompts with task_type — router makes 3× better model choices | Smart router docs |
+| `task_type=long` → Gemini Flash with 1M context window, free, handles books | Model guide |
+| `task_type=code` → deepseek-coder beats GPT-4 on most coding benchmarks, free | HumanEval benchmarks |
 
-<a id="tips-quality"></a>■ **Quality (2)**
-
-| Tip | Source |
-|-----|--------|
-| `--mode best` for important tasks — picks longest response (correlates with completeness) | [DigiMinds](https://github.com/hmzainjamil) |
-| `llm-burst` aggregation mode merges unique insights from all models | [HMZ](https://github.com/hmzainjamil) |
-
-<a id="tips-cache"></a>■ **Cache (2)**
+<a id="tips-models"></a>■ **Model Selection (3)**
 
 | Tip | Source |
-|-----|--------|
-| Cache TTL varies: Groq 5min, Gemini 1hr, OpenAI 1hr — plan prompt-inject accordingly | [HMZ](https://github.com/hmzainjamil) |
-| `tier0-cache-inject` at Claude Code SessionStart hook = pre-warmed every session | [DigiMinds](https://github.com/hmzainjamil) |
+|---|---|
+| deepseek-r1:7b = best free local reasoning model as of 2025 | Model benchmarks |
+| llama3.1:8b = best free local chat model — fast, capable, 128K context | Ollama docs |
+| Groq llama-3.1-70b = free cloud option when local too slow | Groq docs |
+
+<a id="tips-cache"></a>■ **Semantic Cache (3)**
+
+| Tip | Source |
+|---|---|
+| `CACHE_SIMILARITY_THRESHOLD=0.90` — slightly looser threshold catches more near-duplicates | Cache tuning |
+| Cache uses nomic-embed-text locally — zero cost for embedding | Embedding config |
+| `python3 cache/stats.py` — check hit rate; target >30% for repetitive workloads | Cache analytics |
+
+<a id="tips-budget"></a>■ **Budget Control (3)**
+
+| Tip | Source |
+|---|---|
+| With Tier 0 routing, `BUDGET_DAILY_USD=2.00` is rarely hit — mostly Tier 0 handles it | Budget guide |
+| `python3 analytics/dashboard.py` shows cost breakdown by provider — identify leaks | Analytics |
+| Force Tier 0 for internal tasks: `--tier 0` — Claude budget preserved for user-facing output | Tier guide |
+
+---
+
+## 🔧 TROUBLESHOOTING
+
+| Issue | Fix |
+|---|---|
+| Ollama not available | `brew services restart ollama` |
+| All Tier 0 failing | `python3 health/checker.py --check-all` |
+| Cache not hitting | Lower `CACHE_SIMILARITY_THRESHOLD` to 0.90 |
+| Routing to wrong model | Check `config/tiers.yaml` provider order |
+| Budget exceeded | `python3 budget/reset.py --daily` |
+| Server not starting | Check port conflict: `lsof -i :8000` |
+| nomic-embed-text missing | `ollama pull nomic-embed-text` |
+
+---
+
+## 📊 ARCHITECTURE
+
+```
+tier0-llm-router/
+├── router/
+│   ├── smart.py                # Task-aware routing
+│   ├── fallback.py             # Tier escalation chain
+│   └── model_select.py         # Model selection within tier
+├── providers/
+│   └── registry.yaml           # Provider definitions
+├── config/
+│   ├── tiers.yaml              # Tier assignments
+│   └── task_types.yaml         # Task→tier mappings
+├── health/
+│   └── checker.py              # Provider health monitoring
+├── cache/
+│   └── semantic.py             # Semantic dedup cache
+├── cost/
+│   └── calc.py                 # Real-time cost estimation
+├── budget/
+│   └── enforcer.py             # Hard budget limits
+├── rate/
+│   └── limiter.py              # Per-provider rate limiting
+├── logging/
+│   └── logger.py               # Request/response logging
+├── analytics/
+│   └── dashboard.py            # Usage analytics
+├── server.py                   # REST API server
+├── requirements.txt
+└── .env.example
+```
+
+---
+
+## 📋 PROVIDER TIER TABLE
+
+| Provider | Tier | Cost | Context | Best For |
+|---|---|---|---|---|
+| Ollama (local) | 0 | $0 | 128K | All tasks offline |
+| DeepSeek API | 0 | $0.001/1M | 64K | Code, reasoning |
+| Groq | 0 | Free (rate limited) | 128K | Fast inference |
+| Gemini Flash | 0 | Free (15 RPM) | 1M | Long context |
+| Mistral | 0 | Free tier | 32K | European data |
+| GPT-4o-mini | 1 | $0.15/1M | 128K | General fallback |
+| Kimi/Moonshot | 1 | $0.12/1M | 262K | Long context paid |
+| Claude Haiku | 2 | $0.25/1M | 200K | Quality fallback |
+| Claude Sonnet | 2 | $3/1M | 200K | Final output only |
 
 ---
 
 ## ☠️ STARTUPS / BUSINESSES
 
 | This Repo / Feature | Replaced |
-|-|-|
-| **tier0-blast (multi-LLM parallel)** | [RouteLLM](https://github.com/lm-sys/RouteLLM), [LiteLLM](https://litellm.ai), [OpenRouter](https://openrouter.ai) |
-| **tier0-burst (batch processing)** | [Replicate Batch](https://replicate.com), [Together AI Batch](https://together.ai), [Anyscale](https://anyscale.com) |
-| **tier0-cache-inject** | [Semantic Cache](https://redis.io), [GPTCache](https://github.com/zilliztech/GPTCache), [Momento](https://momentohq.com) |
-| **First-wins routing** | [Portkey](https://portkey.ai), [Martian](https://withmartian.com), [Not Diamond](https://notdiamond.ai) |
+|---|---|
+| Tier 0 routing | Paying Claude for every sub-task |
+| Smart routing | Using one model for everything suboptimally |
+| Fallback chain | App errors when single provider goes down |
+| Semantic cache | Re-inferencing identical queries |
+| Budget enforcer | Surprise monthly bill from runaway usage |
+| Health checker | Manual provider status page checking |
+| Analytics dashboard | No visibility into model usage patterns |
+| Rate limiter | 429 errors from accidental burst usage |
 
 ---
 
@@ -143,62 +273,33 @@ OLLAMA_URL=http://localhost:11434
 [![Star History Chart](https://api.star-history.com/svg?repos=hmzainjamil/tier0-llm-router&type=Date)](https://star-history.com/#hmzainjamil/tier0-llm-router&Date)
 
 ---
+<div align="center">Built by <a href="https://github.com/hmzainjamil">HMZ</a> · Part of HMZ Claude AI System</div>
 
 ---
 
-## 🏗 ARCHITECTURE
+## 🔄 CONTRIBUTING
 
+PRs welcome. Please include:
+- Tests for new functionality
+- Updated `config/providers.yaml` if adding providers
+- Benchmark comparison for performance claims
+- Documentation update in README
+
+```bash
+git checkout -b feature/my-feature
+# make changes
+python3 tests/run_all.py  # must pass
+git push origin feature/my-feature
+# open PR
 ```
-~/.claude/
-├── bin/                    ← All executable scripts
-├── skills/                 ← SKILL.md files for Claude
-├── agents/                 ← Agent definition files
-├── tcc-logs/               ← Task execution logs
-│   └── YYYY-MM-DD/         ← Daily log directories
-└── tier0.env               ← API keys for all Tier 0 models
-```
-
-**Dependencies:** Python 3.11+ · Bash · GitHub CLI (`gh`) · Ollama (local models)
 
 ---
 
-## ❓ FAQ
+## 📌 RELATED REPOS
 
-**Q: Do I need all API keys?**
-A: No. Each Tier 0 model is optional. Ollama (free local) works standalone.
-
-**Q: Will this work on Linux/Windows?**
-A: Bash scripts → Linux ✓. Windows needs WSL2. All Python scripts cross-platform.
-
-**Q: How much does it cost to run?**
-A: Groq + Gemini free tiers cover 90% of tasks. DeepSeek/GPT-4o-mini ~$1-5/month heavy use.
-
-**Q: Can I add my own models?**
-A: Yes — add to `tier0.env` + update model list in `tier0-blast`.
-
----
-
-## 📋 CHANGELOG
-
-| Version | Date | Changes |
-|---|---|---|
-| v1.2 | 2026-05-15 | Added ollama watchdog, hermes integration, daily sync |
-| v1.1 | 2026-05-12 | MAE engine, TCC queue, Tier 0 router |
-| v1.0 | 2026-05-10 | Initial release — core scripts + skills |
-
----
-
-## 🔗 RELATED REPOS
-
-| Repo | Relation |
+| Repo | Purpose |
 |---|---|
-| [mae-master-automation-engine](https://github.com/hmzainjamil/mae-master-automation-engine) | Orchestrates this system |
-| [tcc-task-command-center](https://github.com/hmzainjamil/tcc-task-command-center) | Task queue for parallel execution |
-| [tier0-llm-router](https://github.com/hmzainjamil/tier0-llm-router) | LLM routing layer |
-| [hermes-ai-system](https://github.com/hmzainjamil/hermes-ai-system) | Local model orchestration |
-| [claude-ai-system](https://github.com/hmzainjamil/claude-ai-system) | Master backup repo |
-
-
-<div align="center">
-Built by <a href="https://github.com/hmzainjamil">HMZ</a> · Part of the <a href="https://github.com/hmzainjamil/claude-ai-system">HMZ Claude AI System</a> · Zero Claude quota
-</div>
+| [G0DM0D3](https://github.com/hmzainjamil/G0DM0D3) | Multi-model race + Liquid Response |
+| [hermes-ai-system](https://github.com/hmzainjamil/hermes-ai-system) | Local agent with 30+ tools |
+| [claude-ai-system-backup](https://github.com/hmzainjamil/claude-ai-system-backup) | Full system backup |
+| [hmz-ai](https://github.com/hmzainjamil/hmz-ai) | Personal automation hub |
