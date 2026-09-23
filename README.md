@@ -1,5 +1,9 @@
 # tier0-llm-router
 
+<!-- HMZ PORTFOLIO STANDARD -->
+> Portfolio status: active · Visibility: public · Source of truth: current repository source.
+<!-- END HMZ PORTFOLIO STANDARD -->
+
 > **Tier 0 LLM Router** — Local-first model routing: Ollama→DeepSeek→Gemini→Groq→GPT; zero Claude quota burned on sub-tasks.
 
 <p align="center">
