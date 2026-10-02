@@ -39,7 +39,7 @@ DASHSCOPE_KEY = os.environ.get("DASHSCOPE_API_KEY","")
 G0DM0D3_KEY   = os.environ.get("G0DM0D3_KEY","") or os.environ.get("GODMODE_API_KEY","")
 KIMI_KEY      = os.environ.get("KIMI_API_KEY","") or os.environ.get("MOONSHOT_API_KEY","")
 KIMI_BASE     = os.environ.get("MOONSHOT_BASE_URL","https://api.moonshot.ai/v1")
-BYTEZ_KEY     = os.environ.get("BYTEZ_API_KEY","cb4a7065a586ec6ca26394724ce5ec49")
+BYTEZ_KEY     = os.environ.get("BYTEZ_API_KEY", "")
 BYTEZ_BASE    = os.environ.get("BYTEZ_BASE_URL","https://api.bytez.com/models/v2")
 
 # ── Score a response (judge logic) ───────────────────────────────
