@@ -1,154 +1,64 @@
 # tier0-llm-router
 
-> **Tier 0 LLM Router** — Local-first model routing: Ollama→DeepSeek→Gemini→Groq→GPT; zero Claude quota burned on sub-tasks.
+Standalone scripts for parallel model calls, response comparison, and prompt-cache injection. The repository does not contain the Python package, CLI, setup script, hooks, or configuration template described in its previous README.
 
-<p align="center"><a href="https://github.com/hmzainjamil/tier0-llm-router">Repository</a> · <a href="https://github.com/hmzainjamil/tier0-llm-router/commits/main">Commits</a> · <a href="https://github.com/hmzainjamil/tier0-llm-router/issues">Issues</a></p>
-<p align="center"><img alt="Documentation" src="https://img.shields.io/badge/documentation-deep%20editorial-lightgrey"> <img alt="Lifecycle" src="https://img.shields.io/badge/lifecycle-active-success"></p>
-
-<!-- HMZ DEEP README v1 -->
-
-## At a glance
-
-| Field | Current state |
+| Status | Evidence |
 |---|---|
-| Repository | tier0-llm-router |
-| Visibility | Public |
-| Lifecycle | Active |
-| Evidence basis | Current repository documentation and source-visible material |
+| Source reviewed | 2026-10-02; eight tracked scripts on `main` |
+| Tests and evaluation | No test suite or reproducible evaluation is included |
+| Packaging | No dependency manifest or installer is included |
+| License | No license file or declared license in repository metadata |
 
-## Why this exists
+## What is here
 
-**Tier 0 LLM Router** — Local-first model routing: Ollama→DeepSeek→Gemini→Groq→GPT; zero Claude quota burned on sub-tasks.
+| Script | Source-backed behavior |
+|---|---|
+| `llm-burst` | Python async fan-out to configured providers plus local Ollama; ranks responses with a heuristic and prints a selected response. Optional provider selection uses `--models`. |
+| `tier0-burst` | Separate Python model-comparison CLI with fast, full, cloud, and local modes; ranks outputs with its own heuristic. |
+| `tier0-blast` | Bash fan-out to configured providers and a machine-specific GPT4All path. Waits for jobs and prints collected responses. Its usage comment mentions first/all/best, but implementation shown collects all results. |
+| `tier0-blast-async` | Background calls to local Ollama and configured cloud endpoints; writes timestamped results under `/tmp/tier0-cache`. |
+| `tier0-cache-inject` | Prints recent cached response text for use as prompt context. |
+| `tier0-check` | Checks selected local models and configured key presence; can start `ollama serve` and writes `~/.claude/tier0-status.json`. |
+| `tier0-prompt-inject` | Starts the async blast in the background and emits provider-status/context text for a Claude Code prompt hook. |
+| `llm-burst-run` | Wrapper for a different installed path, `~/.claude/bin/llm-burst`; it does not invoke this checkout directly. |
 
-This README focuses on the repository's documented scope and separates implementation claims from plans, external dependencies, and unsupported outcomes.
+## Requirements and setup
 
-## 🧠 CONCEPTS
+These scripts are personal-machine integrations, not a self-contained install. They expect Bash, Python 3, and in places `curl`; Python scripts import `aiohttp`, and optional local inference paths expect Ollama or GPT4All files. No pinned dependency list, supported platform matrix, or setup command is provided.
 
-| Feature | Location | Description |
-|---|---|---|
-| CoreEngine | `core/engine.py` | Primary execution logic and orchestration layer |
-| ConfigManager | `config/manager.py` | Environment validation, hot-reload, API key checks |
-| ProviderAdapters | `adapters/` | Per-provider API wrappers with auth + retry logic |
-| TierRouter | `routing/tier0.py` | Ollama→DeepSeek→Gemini→Groq→GPT cost ladder |
-| OutputFormatter | `output/formatter.py` | Caveman-compressed, signal-dense output pipeline |
-| LogManager | `logs/manager.py` | Structured JSON logging to ~/.claude/tcc-logs/ |
-| HookHandler | `hooks/handler.py` | SessionStart/Stop integration for Claude Code |
-| RetryLogic | `core/retry.py` | Exponential backoff + alt-provider on persistent failure |
-| StatusTracker | `core/status.py` | Per-operation metrics: latency, cost, confidence scores |
-| Scheduler | `schedule/scheduler.py` | LaunchAgent-based cron scheduling for automation |
+The scripts load keys from environment variables and/or `~/.claude/tier0.env`. Some wrappers also source `~/.zshrc`. Review a script and its paths before running it. Do not run `tier0-check` under the assumption that it is read-only.
 
-## ⚙️ HOW IT WORKS
+For the checkout-local Python entry point, after installing `aiohttp` by a method appropriate for your environment:
 
-```
-Input / Trigger (CLI command or hook event)
-    │
-    ▼
-ConfigManager: load .env, validate all provider API keys
-    │
-    ▼
-TierRouter: Ollama → DeepSeek → Gemini → Groq → GPT
-    │        (cost-ordered; local-first enforced always)
-    ▼
-CoreEngine: primary processing with selected provider adapter
-    │
-    ├── ProviderAdapter: API call with rate-limit handling
-    ├── RetryLogic: exponential backoff + alt provider on failure
-    ├── StatusTracker: record latency, cost, confidence score
-    │
-    ▼
-OutputFormatter: caveman-compress result to signal-dense format
-    │
-    ▼
-LogManager: persist full run record to ~/.claude/tcc-logs/
-    │
-    ▼
-stdout / file output / hook callback response
+```sh
+python3 ./llm-burst --help
+python3 ./llm-burst --models ollama "your prompt"
 ```
 
-## 🚀 INSTALL
+The second command selects the local Ollama caller in `llm-burst`; it still requires a running local Ollama service and the script's expected model. This has not been runtime-tested here. Other scripts are coupled to paths under `~/.claude/bin`; inspect and adapt those paths before use.
 
-```bash
-git clone https://github.com/hmzainjamil/tier0-llm-router
-cd tier0-llm-router
-pip install -r requirements.txt
-cp .env.example .env
-# Fill in: GROQ_API_KEY, GEMINI_API_KEY, DEEPSEEK_API_KEY
-# Optional: OPENAI_API_KEY, ANTHROPIC_API_KEY (fallback only)
-python setup.py verify    # confirms all provider connections live
-python setup.py hooks     # installs Claude Code SessionStart/Stop hooks
-mkdir -p ~/.claude/tcc-logs/  # create log directory
-```
+## Provider and data flow
 
-## 📟 USAGE
+`llm-burst` can send the full prompt to every selected, configured cloud provider concurrently. It also calls local Ollama. Its default model selection may include cloud callers when credentials are configured; it is not an enforced local-first fallback ladder. `tier0-blast` and `tier0-blast-async` also fan prompts out to configured cloud endpoints. Provider availability, model names, account access, pricing, and retention are external and are not verified by this repository.
 
-```bash
-# Primary usage — single command fires full pipeline
-python main.py "your goal or task description here"
+The response score is a source-code heuristic based on length, prompt-word overlap, simple formatting/actionability patterns, and refusal/error text. It is not a quality, truth, safety, or task-success evaluation. A higher score does not establish a better answer.
 
-# Specify provider explicitly (skip auto-routing)
-python main.py --provider groq "summarize this document quickly"
+## Limits and known operational details
 
-# Output to file (default: stdout)
-python main.py "task description" --output ~/Downloads/result.md
+- Several scripts assume macOS-specific GPT4All paths or Claude Code directories.
+- Cache files and prompt-hook inputs may contain submitted task text. Async results are written to `/tmp/tier0-cache`; this project does not define a retention or deletion policy.
+- `tier0-check` may launch an Ollama server in the background and writes status under the user's home directory.
+- `tier0-blast` says it supports modes in comments, but source currently waits for all launched processes and prints all collected results.
+- `llm-burst-run` and hook scripts require matching files under `~/.claude/bin`; this repository alone does not install them.
+- No release history, test instructions, changelog, or support policy is supplied.
 
-# Dry run — show routing plan without making any API calls
-python main.py --dry-run "test task to check routing"
+## Documentation
 
-# Verbose mode — shows provider selection, scores, latency
-python main.py --verbose "research task with full debug output"
+- [Security and data handling](SECURITY.md)
 
-# Batch mode — process multiple inputs from file
-python main.py --batch inputs.txt --output ~/Downloads/results/
+## Provenance and license
 
-# Status and health verification
-python main.py status      # show all configured providers + health
-python main.py verify      # test live connections to all providers
-```
-
-## ⚙️ CONFIGURATION
-
-| Variable | Default | Description |
-|---|---|---|
-| `GROQ_API_KEY` | — | Groq Cloud API key (primary fast text provider) |
-| `GEMINI_API_KEY` | — | Google AI Studio key (long-context and multimodal) |
-| `DEEPSEEK_API_KEY` | — | DeepSeek API key (code specialist tasks) |
-| `OPENAI_API_KEY` | — | OpenAI (Tier 1 fallback; used after Tier 0 exhausted) |
-| `ANTHROPIC_API_KEY` | — | Claude (final resort; only on explicit user request) |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama endpoint (checked first always) |
-| `LOG_DIR` | `~/.claude/tcc-logs/` | Output log directory for all run records |
-| `TIMEOUT_S` | `30` | Per-operation timeout in seconds per provider |
-| `RETRY_COUNT` | `2` | Number of retry attempts before marking failed |
-| `CONFIDENCE_THRESHOLD` | `0.6` | Minimum confidence score to accept output (0.0-1.0) |
-| `COMPRESS_OUTPUT` | `true` | Apply caveman-compression to all outputs |
-| `LOG_LEVEL` | `INFO` | Logging verbosity: DEBUG / INFO / WARN / ERROR |
-| `LOCAL_FIRST` | `true` | Always try Ollama before any paid API call |
-| `AUTO_RETRY_ALT` | `true` | Automatically switch provider on persistent failure |
-| `OUTPUT_DIR` | `~/Downloads` | Default directory for all generated file outputs |
-
-## Validation and evidence
-
-No dedicated test or evaluation section was available in the current README.
-
-## 🔐 SECURITY CONSIDERATIONS
-
-## Limitations
-
-- Planned work is not presented as completed functionality.
-- Quantitative claims require reproducible evidence.
-- External provider behavior and pricing remain external dependencies.
-
-## 📚 RELATED REPOS IN THE HMZ AI SYSTEM
-
-| Repo | Role | Dependency |
-|---|---|---|
-| [G0DM0D3](https://github.com/hmzainjamil/G0DM0D3) | Multi-model racing + Liquid Response | Uses tier0-llm-router |
-| [mae-master-automation-engine](https://github.com/hmzainjamil/mae-master-automation-engine) | Goal decomposition + specialist swarm | Uses tcc, tier0 |
-| [tcc-task-command-center](https://github.com/hmzainjamil/tcc-task-command-center) | Parallel blast + queue + dashboard | Used by mae |
-| [tier0-llm-router](https://github.com/hmzainjamil/tier0-llm-router) | Cost-optimized routing ladder | Used by all |
-| [hermes-ai-system](https://github.com/hmzainjamil/hermes-ai-system) | Persistent agent + 80+ skills | Uses tier0, mcp |
-| [claude-ai-system-backup](https://github.com/hmzainjamil/claude-ai-system-backup) | System backup + restore | Backs up all |
-
-<div align="center">Built by <a href="https://github.com/hmzainjamil">HMZ</a> · Part of the <a href="https://github.com/hmzainjamil/claude-ai-system">HMZ Claude AI System</a> · Zero broken workflows</div>
+Repository metadata identifies `hmzainjamil/tier0-llm-router` as public, with default branch `main`. No license is declared in the repository metadata or tracked tree reviewed for this change. Obtain maintainer guidance before redistributing or reusing the scripts.
 
 ## Maintainer
 
